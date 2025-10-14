@@ -78,7 +78,7 @@ class AudioWorker(threading.Thread):
                     break
                 except Exception:
                     LOGGER.exception("WavePlayer feed failed, retrying")
-                    self._request_player_idle()
+                    self._request_player_idle(wait=True)
                     time.sleep(0.02)
                     tries += 1
             if not fed and is_final:
@@ -100,7 +100,7 @@ class AudioWorker(threading.Thread):
                 return
             self._final_emitted = True
         if self._player:
-            self._request_player_idle()
+            self._request_player_idle(wait=True)
         self._invoke_index_callback(None)
 
     def _make_on_done(self, callback, is_final: bool):
@@ -122,7 +122,7 @@ class AudioWorker(threading.Thread):
             except Exception:
                 LOGGER.exception("Index callback failed")
 
-    def _request_player_idle(self) -> None:
+    def _request_player_idle(self, wait: bool = False) -> None:
         player = self._player
         if not player:
             return
@@ -133,10 +133,24 @@ class AudioWorker(threading.Thread):
             except Exception:
                 LOGGER.exception("WavePlayer idle failed")
 
+        done = threading.Event() if wait else None
+
+        def _run_idle() -> None:
+            try:
+                _do_idle()
+            finally:
+                if done:
+                    done.set()
+
         try:
-            queueHandler.queueFunction(queueHandler.eventQueue, _do_idle)
+            queueHandler.queueFunction(queueHandler.eventQueue, _run_idle)
         except Exception:
             LOGGER.exception("Failed to queue WavePlayer idle call")
+            if done:
+                done.set()
+
+        if done and not done.wait(timeout=1.0):
+            LOGGER.debug("Timed out waiting for WavePlayer idle to complete")
 
 
 AudioChunk = Tuple[bytes, Optional[int], bool]
