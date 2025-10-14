@@ -17,6 +17,10 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import config
 import nvwave
+try:
+    import queueHandler
+except ImportError:
+    queueHandler = None
 from buildVersion import version_year
 
 LOGGER = logging.getLogger(__name__)
@@ -120,7 +124,10 @@ class AudioWorker(threading.Thread):
     def _invoke_index_callback(self, value: Optional[int]) -> None:
         if onIndexReached:
             try:
-                onIndexReached(value)
+                if queueHandler is not None:
+                    queueHandler.queueFunction(queueHandler.eventQueue, onIndexReached, value)
+                else:
+                    onIndexReached(value)
             except Exception:
                 LOGGER.exception("Index callback failed")
 
