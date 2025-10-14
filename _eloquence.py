@@ -41,6 +41,8 @@ class AudioWorker(threading.Thread):
         self._running = True
         self._final_lock = threading.Lock()
         self._final_emitted = False
+        self._pending_final = False
+        self._inflight = 0
 
     def run(self) -> None:
         while self._running:
@@ -56,7 +58,7 @@ class AudioWorker(threading.Thread):
                 if index is not None:
                     self._invoke_index_callback(index)
                 if is_final:
-                    self._emit_final()
+                    self._request_finalization()
                 self._queue.task_done()
                 continue
             on_done = None
@@ -72,6 +74,8 @@ class AudioWorker(threading.Thread):
             while tries < 10:
                 try:
                     self._player.feed(data, onDone=wrapped_on_done)
+                    with self._final_lock:
+                        self._inflight += 1
                     if tries:
                         LOGGER.warning("Audio feed retries=%d", tries)
                     fed = True
@@ -82,7 +86,7 @@ class AudioWorker(threading.Thread):
                     time.sleep(0.02)
                     tries += 1
             if not fed and is_final:
-                self._emit_final()
+                self._request_finalization()
             self._queue.task_done()
 
     def stop(self) -> None:
@@ -91,17 +95,23 @@ class AudioWorker(threading.Thread):
 
     def _prepare_for_chunk(self, is_final: bool) -> None:
         with self._final_lock:
-            if self._final_emitted or not is_final:
+            if self._final_emitted:
+                self._final_emitted = False
+                self._pending_final = False
+            elif not is_final and not self._pending_final:
                 self._final_emitted = False
 
-    def _emit_final(self) -> None:
+    def _request_finalization(self) -> None:
         with self._final_lock:
             if self._final_emitted:
                 return
-            self._final_emitted = True
-        if self._player:
-            self._request_player_idle(wait=True)
-        self._invoke_index_callback(None)
+            if self._inflight == 0:
+                self._final_emitted = True
+                self._pending_final = False
+            else:
+                self._pending_final = True
+                return
+        self._finalize_playback()
 
     def _make_on_done(self, callback, is_final: bool):
         def _on_done() -> None:
@@ -110,10 +120,34 @@ class AudioWorker(threading.Thread):
                     callback()
             except Exception:
                 LOGGER.exception("Index callback failed")
-            if is_final:
-                self._emit_final()
+            finally:
+                self._on_chunk_complete(is_final)
 
         return _on_done
+
+    def _on_chunk_complete(self, is_final: bool) -> None:
+        finalize = False
+        with self._final_lock:
+            if self._inflight:
+                self._inflight -= 1
+            if is_final:
+                if not self._final_emitted and self._inflight == 0:
+                    self._final_emitted = True
+                    self._pending_final = False
+                    finalize = True
+                elif not self._final_emitted:
+                    self._pending_final = True
+            elif self._pending_final and not self._final_emitted and self._inflight == 0:
+                self._pending_final = False
+                self._final_emitted = True
+                finalize = True
+        if finalize:
+            self._finalize_playback()
+
+    def _finalize_playback(self) -> None:
+        if self._player:
+            self._request_player_idle(wait=True)
+        self._invoke_index_callback(None)
 
     def _invoke_index_callback(self, value: Optional[int]) -> None:
         if onIndexReached:
