@@ -76,6 +76,19 @@ german_fixes = {
 re.compile(r'dane-ben', re.I): r'dane- ben',
 	re.compile(r'dage-gen', re.I): r'dage- gen',
 }
+VOICE_BCP47 = {
+ "enu": "en-US",
+ "eng": "en-GB",
+ "esp": "es-ES",
+ "esm": "es-419",
+ "ptb": "pt-BR",
+ "fra": "fr-FR",
+ "frc": "fr-CA",
+ "deu": "de-DE",
+ "ita": "it-IT",
+ "fin": "fi-FI",
+}
+
 variants = {1:"Reed",
 2:"Shelley",
 3:"Bobby",
@@ -301,8 +314,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   o = OrderedDict()
   for name in os.listdir(_eloquence.eciPath[:-8]):
    if not name.lower().endswith('.syn'): continue
-   info = _eloquence.langs[name.lower()[:-4]]
-   o[str(info[0])] = synthDriverHandler.VoiceInfo(str(info[0]), info[1], None)
+   voice_code = name.lower()[:-4]
+   info = _eloquence.langs[voice_code]
+   language = VOICE_BCP47.get(voice_code)
+   o[str(info[0])] = synthDriverHandler.VoiceInfo(str(info[0]), info[1], language)
   return o
 
  def _get_voice(self):
