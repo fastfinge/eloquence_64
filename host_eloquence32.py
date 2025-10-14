@@ -296,7 +296,11 @@ class HostController:
     def serve_forever(self) -> None:
         LOGGER.info("Host controller waiting for commands")
         while True:
-            message = self._conn.recv()
+            try:
+                message = self._conn.recv()
+            except (EOFError, ConnectionError, OSError) as exc:
+                LOGGER.info("Connection closed, stopping host controller: %s", exc)
+                break
             if not isinstance(message, dict):
                 LOGGER.warning("Unexpected message %r", message)
                 continue
