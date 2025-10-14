@@ -4,7 +4,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
-import sys 
+import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 import queue
 import shlex
@@ -13,10 +13,11 @@ import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.connection import Listener
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import config
 import nvwave
+import queueHandler
 from buildVersion import version_year
 
 LOGGER = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class AudioWorker(threading.Thread):
                     break
                 except Exception:
                     LOGGER.exception("WavePlayer feed failed, retrying")
-                    self._player.idle()
+                    self._request_player_idle()
                     time.sleep(0.02)
                     tries += 1
             if not fed and is_final:
@@ -99,10 +100,7 @@ class AudioWorker(threading.Thread):
                 return
             self._final_emitted = True
         if self._player:
-            try:
-                self._player.idle()
-            except Exception:
-                LOGGER.exception("WavePlayer idle failed")
+            self._request_player_idle()
         self._invoke_index_callback(None)
 
     def _make_on_done(self, callback, is_final: bool):
@@ -123,6 +121,22 @@ class AudioWorker(threading.Thread):
                 onIndexReached(value)
             except Exception:
                 LOGGER.exception("Index callback failed")
+
+    def _request_player_idle(self) -> None:
+        player = self._player
+        if not player:
+            return
+
+        def _do_idle() -> None:
+            try:
+                player.idle()
+            except Exception:
+                LOGGER.exception("WavePlayer idle failed")
+
+        try:
+            queueHandler.queueFunction(queueHandler.eventQueue, _do_idle)
+        except Exception:
+            LOGGER.exception("Failed to queue WavePlayer idle call")
 
 
 AudioChunk = Tuple[bytes, Optional[int], bool]
@@ -232,8 +246,7 @@ class EloquenceHostClient:
             is_final = bool(payload.get("final", False))
             self._audio_queue.put((data, index, is_final))
         elif event == "stopped":
-            if self._player:
-                self._player.stop()
+            self._queue_player_action("stop", lambda player: player.stop())
         else:
             LOGGER.debug("Unhandled host event %s", event)
 
@@ -308,6 +321,22 @@ class EloquenceHostClient:
             self._receiver.join(timeout=1)
             self._receiver = None
         self._host = None
+
+    def _queue_player_action(self, action_name: str, action: Callable[[nvwave.WavePlayer], None]) -> None:
+        player = self._player
+        if not player:
+            return
+
+        def _run() -> None:
+            try:
+                action(player)
+            except Exception:
+                LOGGER.exception("WavePlayer %s failed", action_name)
+
+        try:
+            queueHandler.queueFunction(queueHandler.eventQueue, _run)
+        except Exception:
+            LOGGER.exception("Failed to queue WavePlayer %s call", action_name)
 
 
 _client = EloquenceHostClient()
