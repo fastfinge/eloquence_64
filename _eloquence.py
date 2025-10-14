@@ -4,7 +4,8 @@ from __future__ import annotations
 import itertools
 import logging
 import os
-import sys 
+import sys
+from contextlib import suppress
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 import queue
 import shlex
@@ -212,6 +213,7 @@ class EloquenceHostClient:
                     self._responses[msg_id] = {"error": "connectionClosed"}
                     event.set()
                 self._pending.clear()
+                self._handle_disconnect()
                 break
             msg_type = message.get("type")
             if msg_type == "response":
@@ -245,7 +247,17 @@ class EloquenceHostClient:
             msg_id = next(self._id_counter)
             event = threading.Event()
             self._pending[msg_id] = event
-            self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
+            try:
+                self._host.connection.send(
+                    {"type": "command", "id": msg_id, "command": command, "payload": payload}
+                )
+            except (BrokenPipeError, OSError):
+                LOGGER.exception("Failed to send command %s", command)
+                self._responses[msg_id] = {"error": "connectionClosed"}
+                self._pending.pop(msg_id, None)
+                event.set()
+                self._handle_disconnect()
+                raise RuntimeError("connectionClosed")
             event.wait()
             response = self._responses.pop(msg_id)
             if "error" in response:
@@ -269,7 +281,7 @@ class EloquenceHostClient:
                 except Exception:
                     LOGGER.exception("WavePlayer idle failed")
 
-    def _clear_audio_queue(self) -> None:
+    def _clear_audio_queue(self, preserve_sentinel: bool = True) -> None:
         cleared = 0
         while True:
             try:
@@ -277,14 +289,44 @@ class EloquenceHostClient:
             except queue.Empty:
                 break
             if item is None:
-                # Preserve sentinel used to shut down the worker thread.
                 self._audio_queue.task_done()
-                self._audio_queue.put(None)
+                if preserve_sentinel:
+                    # Preserve sentinel used to shut down the worker thread.
+                    self._audio_queue.put(None)
                 break
             self._audio_queue.task_done()
             cleared += 1
         if cleared:
             LOGGER.debug("Dropped %d pending audio chunk(s)", cleared)
+
+    # ------------------------------------------------------------------
+    def _handle_disconnect(self) -> None:
+        host = self._host
+        if not host:
+            return
+        LOGGER.warning("Cleaning up after host disconnect")
+        self._host = None
+        self._running.clear()
+        self._clear_audio_queue(preserve_sentinel=False)
+        if self._audio_worker:
+            self._audio_worker.stop()
+            self._audio_worker.join(timeout=1)
+            self._audio_worker = None
+        if self._player:
+            with suppress(Exception):
+                self._player.stop()
+            with suppress(Exception):
+                self._player.idle()
+            with suppress(Exception):
+                self._player.close()
+            self._player = None
+        with suppress(Exception):
+            host.connection.close()
+        with suppress(Exception):
+            host.listener.close()
+        if host.process.poll() is None:
+            with suppress(Exception):
+                host.process.terminate()
 
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
@@ -294,20 +336,10 @@ class EloquenceHostClient:
             self.send_command("delete")
         except Exception:
             LOGGER.exception("Failed to delete host cleanly")
-        if self._audio_worker:
-            self._audio_worker.stop()
-            self._audio_worker.join(timeout=1)
-            self._audio_worker = None
-        if self._player:
-            self._player.close()
-            self._player = None
-        self._host.connection.close()
-        self._host.listener.close()
-        self._host.process.terminate()
+        self._handle_disconnect()
         if self._receiver:
             self._receiver.join(timeout=1)
             self._receiver = None
-        self._host = None
 
 
 _client = EloquenceHostClient()

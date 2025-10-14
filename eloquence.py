@@ -49,6 +49,7 @@ minRate=40
 maxRate=150
 pause_re = re.compile(r'([a-zA-Z])([.(),:;!?])( |$)')
 time_re = re.compile(r"(\d):(\d+):(\d+)")
+line_break_re = re.compile(r'(?:\r\n|\r|\n)+')
 english_fixes = {
 re.compile(r'(\w+)\.([a-zA-Z]+)'): r'\1 dot \2',
 re.compile(r'([a-zA-Z0-9_]+)@(\w+)'): r'\1 at \2',
@@ -178,14 +179,21 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   self.variant = "1"
 
  def speak(self,speechSequence):
-  last = None
+  last_text = None
+  should_pause_next = False
   outlist = []
   for item in speechSequence:
    if isinstance(item,str):
     s=str(item)
-    s = self.xspeakText(s)
-    outlist.append((_eloquence.speak, (s,)))
-    last = s
+    processed = self.xspeakText(s, should_pause=should_pause_next)
+    outlist.append((_eloquence.speak, (processed,)))
+    stripped = s.strip()
+    if stripped:
+     last_text = s
+     should_pause_next = stripped[-1] not in punctuation
+    else:
+     last_text = None
+     should_pause_next = False
    elif isinstance(item,IndexCommand):
     outlist.append((_eloquence.index, (item.index,)))
    elif isinstance(item,BreakCommand):
@@ -216,6 +224,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
     pFactor = factor*item.time
     pFactor = int(pFactor)
     outlist.append((_eloquence.speak, (f'`p{pFactor}.',)))
+    should_pause_next = False
    elif isinstance(item,LangChangeCommand):
     voice_id = self._resolve_voice_for_language(item.lang)
     if voice_id is None:
@@ -240,8 +249,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
      outlist.append((_eloquence.cmdProsody, (pr, None,)))
     else:
      outlist.append((_eloquence.cmdProsody, (pr, item.multiplier,)))
-  if last is not None and not last.rstrip()[-1] in punctuation:
-   outlist.append((_eloquence.speak, ('`p1.',)))
+  if last_text is not None:
+   stripped = last_text.rstrip()
+   if stripped and stripped[-1] not in punctuation:
+    outlist.append((_eloquence.speak, ('`p1.',)))
   outlist.append((_eloquence.index, (0xffff,)))
   outlist.append((_eloquence.synth,()))
   _eloquence.synth_queue.put(outlist)
@@ -257,6 +268,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   #this converts to ansi for anticrash. If this breaks with foreign langs, we can remove it.
   #text = text.encode('mbcs')
   text = normalizeText(text)
+  text = self._replace_line_breaks(text)
   if not self._backquoteVoiceTags:
    text=text.replace('`', ' ')
   text = "`vv%d %s" % (self.getVParam(_eloquence.vlm), text) #no embedded commands
@@ -275,7 +287,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
    text = text + ' `p1.'
   return text
   #  _eloquence.speak(text, index)
-  
+
   # def cancel(self):
   #  self.dll.eciStop(self.handle)
 
@@ -307,6 +319,17 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   if enable == self._phrasePrediction:
    return
   self._phrasePrediction = enable
+
+ def _replace_line_breaks(self, text):
+  def _replacement(match):
+   segment = match.group(0)
+   normalized = segment.replace('\r\n', '\n')
+   count = normalized.count('\n') + normalized.count('\r')
+   if not count:
+    count = 1
+   return ' `p1.' * count + ' '
+
+  return line_break_re.sub(_replacement, text)
  def _get_rate(self):
   return self._paramToPercent(self.getVParam(_eloquence.rate),minRate,maxRate)
 
