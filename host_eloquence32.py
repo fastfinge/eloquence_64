@@ -21,7 +21,7 @@ from multiprocessing.connection import Client
 from typing import Dict, Optional
 
 import ctypes
-from ctypes import c_int, c_void_p, create_string_buffer, pointer
+from ctypes import c_int, c_void_p, create_string_buffer, pointer, cast, c_char_p
 
 # Constants mirrored from the old in-process implementation.
 Callback = ctypes.WINFUNCTYPE(c_int, c_int, c_int, c_int, c_void_p)
@@ -103,6 +103,7 @@ class EloquenceRuntime:
         LOGGER.debug("Sending response for %s", msg_id)
         self._conn.send({"type": "response", "id": msg_id, "payload": payload})
 
+         
     # ------------------------------------------------------------------
     # Eloquence management
     def start(self) -> None:
@@ -111,6 +112,16 @@ class EloquenceRuntime:
 
     def _load_dll(self) -> None:
         LOGGER.info("Loading Eloquence library from %s", self._config.eci_path)
+        ini=open(self._config.eci_path[:-3]+"ini","r+")
+        ini.seek(12)
+        tml=ini.readline()
+        if tml[:-9] != self._config.eci_path[:-8]:
+          ini.seek(12)
+          tmp=ini.read()
+          ini.seek(12)
+          ini.write(tmp.replace(tml[:-9], self._config.eci_path[:-8]))
+          ini.truncate()
+        ini.close()
         self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
         self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
         self._dll.eciRegisterCallback.restype = None
@@ -126,7 +137,7 @@ class EloquenceRuntime:
             raise RuntimeError("Failed to create Eloquence handle")
         self._handle = handle
         self._dll.eciRegisterCallback(handle, self._callback, None)
-        self._dll.eciSetOutputBuffer(handle, self._samples, pointer(self._buffer))
+        self._dll.eciSetOutputBuffer(handle, self._samples, cast(pointer(self._buffer), c_char_p))
         self._dictionary_handle = self._dll.eciNewDict(handle)
         self._dll.eciSetDict(handle, self._dictionary_handle)
         self._params[9] = self._dll.eciGetParam(handle, 9)

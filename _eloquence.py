@@ -4,6 +4,8 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+import sys 
+sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 import queue
 import shlex
 import subprocess
@@ -15,7 +17,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import config
 import nvwave
-from versionInfo import version_year
+from buildVersion import version_year
 
 LOGGER = logging.getLogger(__name__)
 
@@ -222,6 +224,19 @@ voice_params: Dict[int, int] = {}
 
 
 # Public API ---------------------------------------------------------------------
+hsz=1; pitch=2; fluctuation=3; rgh=4; bth=5; rate=6; vlm=7
+eciPath = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
+langs={'esm': (131073, 'Latin American Spanish'),
+'esp': (131072, 'Castilian Spanish'),
+'ptb': (458752, 'Brazilian Portuguese'),
+'frc': (196609, 'French Canadian'),
+'fra': (196608, 'French'),
+'fin': (589824, 'Finnish'),
+'deu': (262144, 'German'),
+'ita': (327680, 'Italian'),
+'enu': (65536, 'American English'),
+'eng': (65537, 'British English')}
+    
 def initialize(indexCallback=None):
     global onIndexReached
     _client.ensure_started()
