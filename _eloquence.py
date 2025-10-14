@@ -34,6 +34,9 @@ class AudioWorker(threading.Thread):
         self._player = player
         self._queue = audio_queue
         self._running = True
+        self._state_lock = threading.Lock()
+        self._pending_playbacks = 0
+        self._final_pending = False
 
     def run(self) -> None:
         while self._running:
@@ -48,8 +51,8 @@ class AudioWorker(threading.Thread):
                 if index is not None:
                     if onIndexReached:
                         onIndexReached(index)
-                elif is_final and onIndexReached:
-                    onIndexReached(None)
+                elif is_final:
+                    self._mark_final_pending()
                 self._queue.task_done()
                 continue
             on_done = None
@@ -60,30 +63,81 @@ class AudioWorker(threading.Thread):
                         onIndexReached(i)
 
                 on_done = _callback
-            elif is_final:
-
-                def _callback_final():
-                    if onIndexReached:
-                        onIndexReached(None)
-
-                on_done = _callback_final
+            wrapped_on_done = self._make_on_done(on_done)
             tries = 0
+            fed = False
             while tries < 10:
                 try:
-                    self._player.feed(data, onDone=on_done)
+                    self._increment_pending()
+                    self._player.feed(data, onDone=wrapped_on_done)
                     if tries:
                         LOGGER.warning("Audio feed retries=%d", tries)
+                    if is_final:
+                        self._mark_final_pending()
+                    fed = True
                     break
                 except Exception:
                     LOGGER.exception("WavePlayer feed failed, retrying")
+                    self._decrement_pending()
                     self._player.idle()
                     time.sleep(0.02)
                     tries += 1
+            if not fed and is_final:
+                self._mark_final_pending()
             self._queue.task_done()
 
     def stop(self) -> None:
         self._running = False
         self._queue.put(None)
+
+    def _increment_pending(self) -> None:
+        with self._state_lock:
+            self._pending_playbacks += 1
+
+    def _decrement_pending(self) -> None:
+        should_emit_final = False
+        with self._state_lock:
+            if self._pending_playbacks:
+                self._pending_playbacks -= 1
+            else:
+                LOGGER.warning("Audio playback bookkeeping underflow")
+            if self._final_pending and self._pending_playbacks == 0:
+                self._final_pending = False
+                should_emit_final = True
+        if should_emit_final:
+            self._emit_final()
+
+    def _mark_final_pending(self) -> None:
+        should_emit_final = False
+        with self._state_lock:
+            self._final_pending = True
+            if self._pending_playbacks == 0:
+                self._final_pending = False
+                should_emit_final = True
+        if should_emit_final:
+            self._emit_final()
+
+    def _emit_final(self) -> None:
+        if onIndexReached:
+            try:
+                onIndexReached(None)
+            except Exception:
+                LOGGER.exception("Index callback failed")
+        if self._player:
+            try:
+                self._player.idle()
+            except Exception:
+                LOGGER.exception("WavePlayer idle failed")
+
+    def _make_on_done(self, callback):
+        def _on_done() -> None:
+            try:
+                if callback:
+                    callback()
+            finally:
+                self._decrement_pending()
+
+        return _on_done
 
 
 AudioChunk = Tuple[bytes, Optional[int], bool]
@@ -107,6 +161,7 @@ class EloquenceHostClient:
         self._player: Optional[nvwave.WavePlayer] = None
         self._audio_worker: Optional[AudioWorker] = None
         self._running = threading.Event()
+        self._command_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
@@ -201,15 +256,16 @@ class EloquenceHostClient:
     def send_command(self, command: str, **payload: Any) -> Dict[str, Any]:
         if not self._host:
             raise RuntimeError("Host not started")
-        msg_id = next(self._id_counter)
-        event = threading.Event()
-        self._pending[msg_id] = event
-        self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
-        event.wait()
-        response = self._responses.pop(msg_id)
-        if "error" in response:
-            raise RuntimeError(response["error"])
-        return response.get("payload", {})
+        with self._command_lock:
+            msg_id = next(self._id_counter)
+            event = threading.Event()
+            self._pending[msg_id] = event
+            self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
+            event.wait()
+            response = self._responses.pop(msg_id)
+            if "error" in response:
+                raise RuntimeError(response["error"])
+            return response.get("payload", {})
 
     def stop(self) -> None:
         if not self._host:
@@ -273,6 +329,9 @@ _client = EloquenceHostClient()
 synth_queue = queue.Queue()
 params: Dict[int, int] = {}
 voice_params: Dict[int, int] = {}
+_synth_worker: Optional[threading.Thread] = None
+_synth_worker_lock = threading.Lock()
+_synth_worker_stop = threading.Event()
 
 
 # Public API ---------------------------------------------------------------------
@@ -293,6 +352,7 @@ def initialize(indexCallback=None):
     global onIndexReached
     _client.ensure_started()
     _client.initialize_audio()
+    _ensure_synth_worker()
     onIndexReached = indexCallback
     eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
     voice_conf = config.conf.get("speech", {}).get("eci", {})
@@ -356,6 +416,7 @@ def pause(switch):
 
 def terminate():
     _client.shutdown()
+    _stop_synth_worker()
 
 
 def set_voice(vl):
@@ -381,11 +442,56 @@ def setVariant(v):
 
 
 def process():
-    while not synth_queue.empty():
-        lst = synth_queue.get()
-        for func, args in lst:
-            func(*args)
-        synth_queue.task_done()
+    _ensure_synth_worker()
+
+
+def _synth_worker_loop() -> None:
+    while True:
+        try:
+            lst = synth_queue.get(timeout=0.1)
+        except queue.Empty:
+            if _synth_worker_stop.is_set():
+                break
+            continue
+        if lst is None:
+            synth_queue.task_done()
+            break
+        try:
+            for func, args in lst:
+                try:
+                    func(*args)
+                except Exception:
+                    LOGGER.exception("Synthesis command failed")
+        finally:
+            synth_queue.task_done()
+
+
+def _ensure_synth_worker() -> None:
+    global _synth_worker
+    with _synth_worker_lock:
+        if _synth_worker and _synth_worker.is_alive():
+            return
+        _synth_worker_stop.clear()
+        _synth_worker = threading.Thread(
+            target=_synth_worker_loop, name="EloquenceSynthWorker", daemon=True
+        )
+        _synth_worker.start()
+
+
+def _stop_synth_worker() -> None:
+    global _synth_worker
+    with _synth_worker_lock:
+        if not _synth_worker:
+            return
+        _synth_worker_stop.set()
+        synth_queue.put(None)
+        _synth_worker.join(timeout=1)
+        if _synth_worker.is_alive():
+            LOGGER.warning("Synthesis worker failed to terminate cleanly")
+        _synth_worker = None
+        _synth_worker_stop.clear()
+
+
 def eciCheck() -> bool:
     eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
     return os.path.exists(eci_path)
