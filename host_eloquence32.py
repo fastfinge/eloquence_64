@@ -195,7 +195,15 @@ class EloquenceRuntime:
     def synthesize(self) -> None:
         LOGGER.debug("Starting synthesis")
         self._speaking = True
-        self._dll.eciSynthesize(self._handle)
+        try:
+            self._dll.eciSynthesize(self._handle)
+            if not self._dll.eciSynchronize(self._handle):
+                LOGGER.warning("eciSynchronize reported failure")
+        finally:
+            self._speaking = False
+            # Ensure any buffered audio is pushed even if the final index was not
+            # delivered (for example if the controller stops early).
+            self._flush_audio()
 
     def stop(self) -> None:
         LOGGER.debug("Stopping synthesis")
@@ -236,6 +244,7 @@ class EloquenceRuntime:
     def _on_callback(self, handle, message, length, user_data):
         if not self._speaking:
             return 2
+        LOGGER.debug("Callback message=%s length=%s", message, length)
         if message == 0:
             if self._audio_buffer.tell() >= self._samples * 2:
                 self._flush_audio()
@@ -244,6 +253,8 @@ class EloquenceRuntime:
         elif message == 2:
             index_value = length if length != FINAL_INDEX else None
             self._flush_audio(index_value)
+            if index_value is None:
+                self._speaking = False
         return 1
 
     def _flush_audio(self, index: Optional[int] = None) -> None:
