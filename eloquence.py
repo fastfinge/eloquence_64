@@ -43,6 +43,8 @@ from . import _eloquence
 from collections import OrderedDict
 import unicodedata
 
+log = logging.getLogger(__name__)
+
 minRate=40
 maxRate=150
 pause_re = re.compile(r'([a-zA-Z])([.(),:;!?])( |$)')
@@ -76,6 +78,38 @@ german_fixes = {
 re.compile(r'dane-ben', re.I): r'dane- ben',
 	re.compile(r'dage-gen', re.I): r'dage- gen',
 }
+VOICE_BCP47 = {
+ "enu": "en-US",
+ "eng": "en-GB",
+ "esp": "es-ES",
+ "esm": "es-419",
+ "ptb": "pt-BR",
+ "fra": "fr-FR",
+ "frc": "fr-CA",
+ "deu": "de-DE",
+ "ita": "it-IT",
+ "fin": "fi-FI",
+}
+
+VOICE_CODE_TO_ID = {code: str(info[0]) for code, info in _eloquence.langs.items()}
+VOICE_ID_TO_BCP47 = {
+ voice_id: VOICE_BCP47.get(code)
+ for code, voice_id in VOICE_CODE_TO_ID.items()
+ if VOICE_BCP47.get(code)
+}
+LANGUAGE_TO_VOICE_ID = {
+ lang.lower(): VOICE_CODE_TO_ID[code]
+ for code, lang in VOICE_BCP47.items()
+ if code in VOICE_CODE_TO_ID
+}
+PRIMARY_LANGUAGE_TO_VOICE_IDS = {}
+for code, lang in VOICE_BCP47.items():
+ voice_id = VOICE_CODE_TO_ID.get(code)
+ if not voice_id:
+  continue
+ primary = lang.split("-", 1)[0].lower()
+ PRIMARY_LANGUAGE_TO_VOICE_IDS.setdefault(primary, []).append(voice_id)
+
 variants = {1:"Reed",
 2:"Shelley",
 3:"Bobby",
@@ -134,7 +168,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   return _eloquence.eciCheck()
  def __init__(self):
   _eloquence.initialize(self._onIndexReached)
-  self.curvoice="enu"
+  voice_param = _eloquence.params.get(9)
+  if voice_param is None:
+   configured_voice = config.conf.get("speech", {}).get("eci", {}).get("voice", "enu")
+   voice_info = _eloquence.langs.get(configured_voice) or _eloquence.langs.get("enu")
+   voice_param = voice_info[0] if voice_info else 65536
+  self._update_voice_state(voice_param, update_default=True)
   self.rate=50
   self.variant = "1"
 
@@ -173,10 +212,27 @@ class SynthDriver(synthDriverHandler.SynthDriver):
      ri = li + 1
      ra = ck[li]
      rb = ck[ri]
-     factor = 1.0 * coefficients[ra] + (coefficients[rb] - coefficients[ra]) * (self.rate - ra) / (rb-ra)
+    factor = 1.0 * coefficients[ra] + (coefficients[rb] - coefficients[ra]) * (self.rate - ra) / (rb-ra)
     pFactor = factor*item.time
     pFactor = int(pFactor)
     outlist.append((_eloquence.speak, (f'`p{pFactor}.',)))
+   elif isinstance(item,LangChangeCommand):
+    voice_id = self._resolve_voice_for_language(item.lang)
+    if voice_id is None:
+     log.debug("No Eloquence voice mapped for language '%s'", item.lang)
+     continue
+    voice_str = str(voice_id)
+    if voice_str == self.curvoice:
+     if item.lang is None:
+      self._languageOverrideActive = False
+     continue
+    try:
+     queued_voice = int(voice_id)
+    except (TypeError, ValueError):
+     log.debug("Skipping language change for '%s': invalid voice id %r", item.lang, voice_id)
+     continue
+    outlist.append((_eloquence.set_voice, (queued_voice,)))
+    self._update_voice_state(queued_voice, update_default=item.lang is None)
    elif type(item) in self.PROSODY_ATTRS:
     pr = self.PROSODY_ATTRS[type(item)]
     if item.multiplier==1:
@@ -301,15 +357,61 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   o = OrderedDict()
   for name in os.listdir(_eloquence.eciPath[:-8]):
    if not name.lower().endswith('.syn'): continue
-   info = _eloquence.langs[name.lower()[:-4]]
-   o[str(info[0])] = synthDriverHandler.VoiceInfo(str(info[0]), info[1], None)
+   voice_code = name.lower()[:-4]
+   info = _eloquence.langs[voice_code]
+   language = VOICE_BCP47.get(voice_code)
+   o[str(info[0])] = synthDriverHandler.VoiceInfo(str(info[0]), info[1], language)
   return o
 
  def _get_voice(self):
   return str(_eloquence.params[9])
  def _set_voice(self,vl):
   _eloquence.set_voice(vl)
-  self.curvoice = vl
+  self._update_voice_state(vl, update_default=True)
+ def _update_voice_state(self, voice_id, update_default):
+  voice_str = str(voice_id)
+  try:
+   _eloquence.params[9] = int(voice_str)
+  except (TypeError, ValueError):
+   log.debug("Unable to coerce Eloquence voice id '%s' to int", voice_id)
+  if update_default or not getattr(self, "_defaultVoice", None):
+   self._defaultVoice = voice_str
+  self.curvoice = voice_str
+  current_default = getattr(self, "_defaultVoice", None)
+  self._languageOverrideActive = (not update_default) and current_default is not None and voice_str != current_default
+ def _resolve_voice_for_language(self, language):
+  if not language:
+   return getattr(self, "_defaultVoice", None)
+  normalized = language.lower()
+  voice_id = LANGUAGE_TO_VOICE_ID.get(normalized)
+  if voice_id:
+   return voice_id
+  primary, _, region = normalized.partition('-')
+  default_voice = getattr(self, "_defaultVoice", None)
+  default_lang = VOICE_ID_TO_BCP47.get(default_voice) if default_voice else None
+  if default_lang:
+   default_primary, _, default_region = default_lang.lower().partition('-')
+   if default_primary == primary and (not region or default_region == region):
+    return default_voice
+  candidates = PRIMARY_LANGUAGE_TO_VOICE_IDS.get(primary, [])
+  if not candidates:
+   return None
+  if region:
+   for candidate in candidates:
+    candidate_tag = VOICE_ID_TO_BCP47.get(candidate)
+    if not candidate_tag:
+     continue
+    cand_primary, _, cand_region = candidate_tag.lower().partition('-')
+    if cand_primary == primary and cand_region == region:
+     return candidate
+   if primary == "es":
+    for candidate in candidates:
+     candidate_tag = VOICE_ID_TO_BCP47.get(candidate)
+     if candidate_tag and candidate_tag.lower().endswith("-419"):
+      return candidate
+  if default_lang and default_lang.lower().partition('-')[0] == primary:
+   return default_voice
+  return candidates[0]
  def getVParam(self,pr):
   return _eloquence.getVParam(pr)
 
