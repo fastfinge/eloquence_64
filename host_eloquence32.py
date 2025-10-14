@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys 
+sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 from dataclasses import dataclass
 from io import BytesIO
 from multiprocessing.connection import Client
