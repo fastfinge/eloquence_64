@@ -193,6 +193,40 @@ class EloquenceHostClient:
             raise RuntimeError(response["error"])
         return response.get("payload", {})
 
+    def stop(self) -> None:
+        if not self._host:
+            return
+        try:
+            self.send_command("stop")
+        finally:
+            self._clear_audio_queue()
+            if self._player:
+                try:
+                    self._player.stop()
+                except Exception:
+                    LOGGER.exception("WavePlayer stop failed")
+                try:
+                    self._player.idle()
+                except Exception:
+                    LOGGER.exception("WavePlayer idle failed")
+
+    def _clear_audio_queue(self) -> None:
+        cleared = 0
+        while True:
+            try:
+                item = self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                # Preserve sentinel used to shut down the worker thread.
+                self._audio_queue.task_done()
+                self._audio_queue.put(None)
+                break
+            self._audio_queue.task_done()
+            cleared += 1
+        if cleared:
+            LOGGER.debug("Dropped %d pending audio chunk(s)", cleared)
+
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
         if not self._host:
@@ -280,7 +314,21 @@ def synth():
 
 
 def stop():
-    _client.send_command("stop")
+    _client.stop()
+    _clear_synth_queue()
+
+
+def _clear_synth_queue() -> None:
+    cleared = 0
+    while True:
+        try:
+            synth_queue.get_nowait()
+        except queue.Empty:
+            break
+        synth_queue.task_done()
+        cleared += 1
+    if cleared:
+        LOGGER.debug("Dropped %d pending synthesis request(s)", cleared)
 
 
 def pause(switch):

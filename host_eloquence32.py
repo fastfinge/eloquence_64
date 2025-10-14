@@ -41,6 +41,9 @@ BTH = 5
 RATE = 6
 VLM = 7
 
+# Synthesis state parameters.
+ECI_INPUT_TYPE = 1
+
 # A sentinel index value used by Eloquence to mark the end of a chunk.
 FINAL_INDEX = 0xFFFF
 
@@ -152,6 +155,9 @@ class EloquenceRuntime:
             raise RuntimeError("eciSetOutputBuffer failed")
         self._dictionary_handle = self._dll.eciNewDict(handle)
         self._dll.eciSetDict(handle, self._dictionary_handle)
+        # Allow annotated input so that backquote commands are interpreted instead of spoken.
+        self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
+        self._params[ECI_INPUT_TYPE] = 1
         self._params[9] = self._dll.eciGetParam(handle, 9)
         self._voice_params[RATE] = self._dll.eciGetVoiceParam(handle, 0, RATE)
         self._voice_params[PITCH] = self._dll.eciGetVoiceParam(handle, 0, PITCH)
