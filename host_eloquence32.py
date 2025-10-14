@@ -21,7 +21,13 @@ from multiprocessing.connection import Client
 from typing import Dict, Optional
 
 import ctypes
-from ctypes import c_int, c_void_p, create_string_buffer, pointer, cast, c_char_p
+from ctypes import (
+    POINTER,
+    c_int,
+    c_short,
+    c_void_p,
+    cast,
+)
 
 # Constants mirrored from the old in-process implementation.
 Callback = ctypes.WINFUNCTYPE(c_int, c_int, c_int, c_int, c_void_p)
@@ -85,7 +91,11 @@ class EloquenceRuntime:
         self._callback = Callback(self._on_callback)
         self._audio_buffer = BytesIO()
         self._samples = 3300
-        self._buffer = create_string_buffer(self._samples * 2)
+        # eciSetOutputBuffer expects a pointer to 16-bit PCM samples.  Using a
+        # c_short array keeps the data in the correct format and avoids the
+        # char* semantics of create_string_buffer which truncate at the first
+        # NUL byte when passed as c_char_p.
+        self._buffer = (c_short * self._samples)()
         self._params: Dict[int, int] = {}
         self._voice_params: Dict[int, int] = {}
         self._speaking = False
@@ -125,8 +135,8 @@ class EloquenceRuntime:
         self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
         self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
         self._dll.eciRegisterCallback.restype = None
-        self._dll.eciSetOutputBuffer.argtypes = [c_void_p, c_int, ctypes.POINTER(ctypes.c_char)]
-        self._dll.eciSetOutputBuffer.restype = None
+        self._dll.eciSetOutputBuffer.argtypes = [c_void_p, c_int, POINTER(c_short)]
+        self._dll.eciSetOutputBuffer.restype = c_int
 
         language_id = LANGS.get(self._config.language_code, LANGS["enu"])
         LOGGER.debug("Creating Eloquence handle for language %s -> %s", self._config.language_code, language_id)
@@ -137,7 +147,9 @@ class EloquenceRuntime:
             raise RuntimeError("Failed to create Eloquence handle")
         self._handle = handle
         self._dll.eciRegisterCallback(handle, self._callback, None)
-        self._dll.eciSetOutputBuffer(handle, self._samples, cast(pointer(self._buffer), c_char_p))
+        result = self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer)
+        if not result:
+            raise RuntimeError("eciSetOutputBuffer failed")
         self._dictionary_handle = self._dll.eciNewDict(handle)
         self._dll.eciSetDict(handle, self._dictionary_handle)
         self._params[9] = self._dll.eciGetParam(handle, 9)
@@ -227,7 +239,7 @@ class EloquenceRuntime:
         if message == 0:
             if self._audio_buffer.tell() >= self._samples * 2:
                 self._flush_audio()
-            data = ctypes.string_at(self._buffer, length * 2)
+            data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))
             self._audio_buffer.write(data)
         elif message == 2:
             index_value = length if length != FINAL_INDEX else None
