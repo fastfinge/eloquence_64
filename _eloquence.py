@@ -6,18 +6,16 @@ import logging
 import os
 import queue
 import shlex
-import socket
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from multiprocessing.connection import Listener
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import config
 import nvwave
 from versionInfo import version_year
-
-from ipc import IpcConnection, accept_authenticated, create_listener
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,8 +73,8 @@ AudioChunk = Tuple[bytes, Optional[int]]
 @dataclass
 class HostProcess:
     process: subprocess.Popen
-    connection: IpcConnection
-    listener: socket.socket
+    connection: Any
+    listener: Listener
 
 
 class EloquenceHostClient:
@@ -97,19 +95,14 @@ class EloquenceHostClient:
             return
         addon_dir = os.path.abspath(os.path.dirname(__file__))
         authkey = os.urandom(AUTH_KEY_BYTES)
-        listener = create_listener()
-        address = listener.getsockname()
+        listener = Listener(("127.0.0.1", 0), authkey=authkey)
+        address = listener.address
         port = address[1]
         cmd = list(self._resolve_host_executable(addon_dir))
         cmd.extend(["--address", f"127.0.0.1:{port}", "--authkey", authkey.hex(), "--log-dir", addon_dir])
         LOGGER.info("Launching Eloquence host: %s", cmd)
         proc = subprocess.Popen(cmd, cwd=addon_dir)
-        try:
-            conn = accept_authenticated(listener, authkey)
-        except Exception:
-            listener.close()
-            proc.terminate()
-            raise
+        conn = listener.accept()
         self._host = HostProcess(process=proc, connection=conn, listener=listener)
         self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
         self._receiver.start()
@@ -154,7 +147,7 @@ class EloquenceHostClient:
         while True:
             try:
                 message = connection.recv()
-            except (EOFError, ConnectionError):
+            except EOFError:
                 LOGGER.info("Host connection closed")
                 for msg_id, event in list(self._pending.items()):
                     self._responses[msg_id] = {"error": "connectionClosed"}

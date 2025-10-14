@@ -2,7 +2,7 @@
 
 This module is executed as a separate helper process under a 32-bit
 Python runtime.  It loads the ETI-Eloquence DLL directly and exposes a
-simple RPC protocol over a lightweight socket transport so that
+simple RPC protocol over a `multiprocessing.connection` channel so that
 64-bit NVDA builds can continue to make use of the original synthesizer.
 
 The helper deliberately avoids importing NVDA modules to keep the
@@ -17,12 +17,11 @@ import logging
 import os
 from dataclasses import dataclass
 from io import BytesIO
+from multiprocessing.connection import Client
 from typing import Dict, Optional
 
 import ctypes
 from ctypes import c_int, c_void_p, create_string_buffer, pointer
-
-from ipc import IpcConnection, connect_to_listener
 
 # Constants mirrored from the old in-process implementation.
 Callback = ctypes.WINFUNCTYPE(c_int, c_int, c_int, c_int, c_void_p)
@@ -77,7 +76,7 @@ class HostConfig:
 class EloquenceRuntime:
     """Wraps access to the 32-bit Eloquence DLL."""
 
-    def __init__(self, conn: IpcConnection, config: HostConfig):
+    def __init__(self, conn: Client, config: HostConfig):
         self._conn = conn
         self._config = config
         self._dll = None  # type: ignore[assignment]
@@ -234,7 +233,7 @@ class EloquenceRuntime:
 
 
 class HostController:
-    def __init__(self, conn: IpcConnection):
+    def __init__(self, conn: Client):
         self._conn = conn
         self._runtime: Optional[EloquenceRuntime] = None
         self._handlers = {
@@ -338,7 +337,7 @@ def main() -> None:
     host, port_str = args.address.split(":")
     address = (host, int(port_str))
     authkey = bytes.fromhex(args.authkey)
-    conn = connect_to_listener(address, authkey)
+    conn = Client(address, authkey=authkey)
     controller = HostController(conn)
     controller.serve_forever()
 
