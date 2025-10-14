@@ -257,19 +257,22 @@ class EloquenceRuntime:
             data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))
             self._audio_buffer.write(data)
         elif message == 2:
-            index_value = length if length != FINAL_INDEX else None
-            self._flush_audio(index_value)
-            if index_value is None:
+            is_final = length == FINAL_INDEX
+            index_value = length if not is_final else None
+            self._flush_audio(index_value, force=True, final=is_final)
+            if is_final:
                 self._speaking = False
         return 1
 
-    def _flush_audio(self, index: Optional[int] = None) -> None:
+    def _flush_audio(self, index: Optional[int] = None, force: bool = False, final: bool = False) -> None:
         if self._audio_buffer.tell() == 0:
+            if force or final:
+                self._send_event("audio", data=b"", index=index, final=final)
             return
         payload = self._audio_buffer.getvalue()
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
-        self._send_event("audio", data=payload, index=index)
+        self._send_event("audio", data=payload, index=index, final=final)
 
 
 class HostController:

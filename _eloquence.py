@@ -43,13 +43,30 @@ class AudioWorker(threading.Thread):
                 continue
             if chunk is None:
                 break
-            data, index = chunk
+            data, index, is_final = chunk
+            if not data:
+                if index is not None:
+                    if onIndexReached:
+                        onIndexReached(index)
+                elif is_final and onIndexReached:
+                    onIndexReached(None)
+                self._queue.task_done()
+                continue
             on_done = None
             if index is not None:
+
                 def _callback(i=index):
                     if onIndexReached:
                         onIndexReached(i)
+
                 on_done = _callback
+            elif is_final:
+
+                def _callback_final():
+                    if onIndexReached:
+                        onIndexReached(None)
+
+                on_done = _callback_final
             tries = 0
             while tries < 10:
                 try:
@@ -69,7 +86,7 @@ class AudioWorker(threading.Thread):
         self._queue.put(None)
 
 
-AudioChunk = Tuple[bytes, Optional[int]]
+AudioChunk = Tuple[bytes, Optional[int], bool]
 
 # RPC client ---------------------------------------------------------------------
 @dataclass
@@ -172,7 +189,8 @@ class EloquenceHostClient:
         if event == "audio":
             data = payload.get("data", b"")
             index = payload.get("index")
-            self._audio_queue.put((data, index))
+            is_final = bool(payload.get("final", False))
+            self._audio_queue.put((data, index, is_final))
         elif event == "stopped":
             if self._player:
                 self._player.stop()
