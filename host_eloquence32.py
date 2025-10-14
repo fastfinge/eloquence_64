@@ -137,8 +137,6 @@ class EloquenceRuntime:
         self._dll.eciRegisterCallback.restype = None
         self._dll.eciSetOutputBuffer.argtypes = [c_void_p, c_int, POINTER(c_short)]
         self._dll.eciSetOutputBuffer.restype = c_int
-        self._dll.eciSynchronize.argtypes = [c_void_p]
-        self._dll.eciSynchronize.restype = c_int
 
         language_id = LANGS.get(self._config.language_code, LANGS["enu"])
         LOGGER.debug("Creating Eloquence handle for language %s -> %s", self._config.language_code, language_id)
