@@ -46,6 +46,8 @@ class EloquenceHostClient:
         self._player: Optional[nvwave.WavePlayer] = None
         self._awaiting_final = False
         self._command_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._id_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
@@ -105,16 +107,18 @@ class EloquenceHostClient:
                 message = connection.recv()
             except EOFError:
                 LOGGER.info("Host connection closed")
-                for msg_id, event in list(self._pending.items()):
-                    self._responses[msg_id] = {"error": "connectionClosed"}
-                    event.set()
-                self._pending.clear()
+                with self._pending_lock:
+                    for msg_id, event in list(self._pending.items()):
+                        self._responses[msg_id] = {"error": "connectionClosed"}
+                        event.set()
+                    self._pending.clear()
                 break
             msg_type = message.get("type")
             if msg_type == "response":
                 msg_id = message["id"]
-                self._responses[msg_id] = message
-                event = self._pending.pop(msg_id, None)
+                with self._pending_lock:
+                    self._responses[msg_id] = message
+                    event = self._pending.pop(msg_id, None)
                 if event:
                     event.set()
             elif msg_type == "event":
@@ -202,16 +206,24 @@ class EloquenceHostClient:
     def send_command(self, command: str, **payload: Any) -> Dict[str, Any]:
         if not self._host:
             raise RuntimeError("Host not started")
-        with self._command_lock:
+        with self._id_lock:
             msg_id = next(self._id_counter)
-            event = threading.Event()
+        event = threading.Event()
+        with self._pending_lock:
             self._pending[msg_id] = event
-            self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
-            event.wait()
+        try:
+            with self._command_lock:
+                self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
+        except Exception:
+            with self._pending_lock:
+                self._pending.pop(msg_id, None)
+            raise
+        event.wait()
+        with self._pending_lock:
             response = self._responses.pop(msg_id)
-            if "error" in response:
-                raise RuntimeError(response["error"])
-            return response.get("payload", {})
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        return response.get("payload", {})
 
     def stop(self) -> None:
         if not self._host:
