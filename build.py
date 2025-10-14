@@ -49,6 +49,6 @@ updateZip(FILE_NAME, "synthDrivers/eloquence.py", "eloquence.py")
 updateZip(FILE_NAME, "synthDrivers/_eloquence.py", "_eloquence.py")
 updateZip(FILE_NAME, "synthDrivers/ipc.py", "ipc.py")
 updateZip(FILE_NAME, "manifest.ini", "manifest.ini")
-updateZip(FILE_NAME, "synthDrivers/eloquence_host32.exe", "eloquence_host32.exe")
+updateZip(FILE_NAME, "synthDrivers/eloquence_host32.exe", "dist/eloquence_host32.exe")
 print(f"Created {FILE_NAME}")
 
