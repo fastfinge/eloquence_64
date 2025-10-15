@@ -4,7 +4,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
-import sys 
+import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 import queue
 import shlex
@@ -26,6 +26,62 @@ HOST_SCRIPT = "host_eloquence32.py"
 AUTH_KEY_BYTES = 16
 
 onIndexReached = None
+
+
+def _patch_waveplayer_idle_check() -> None:
+    """Ensure nvwave's idle check iterates over a stable snapshot."""
+
+    sentinel_attr = "_eloquenceIdleCheckPatched"
+    if getattr(nvwave.WavePlayer, sentinel_attr, False):
+        return
+
+    original = nvwave.WavePlayer._idleCheck
+
+    @classmethod
+    def _safe_idle_check(cls):
+        """Thread-safe wrapper around nvwave.WavePlayer._idleCheck."""
+
+        cls._isIdleCheckPending = False
+        threshold = time.time() - cls._IDLE_TIMEOUT
+        stillActiveStream = False
+        # Copy the dictionary to avoid race conditions when the weak reference
+        # set is modified by another thread while we iterate over it.
+        debug_nvwave = getattr(nvwave, "_isDebugForNvWave", lambda: False)
+        for attempt in range(3):
+            try:
+                players = list(cls._instances.copy().values())
+            except RuntimeError:
+                if debug_nvwave():
+                    LOGGER.debug("Retrying idle check snapshot due to concurrent modification")
+                continue
+            break
+        else:
+            if debug_nvwave():
+                LOGGER.debug("Falling back to empty idle check snapshot due to repeated failures")
+            players = []
+
+        for player in players:
+            if player is None or not player._lastActiveTime or player._isPaused:
+                continue
+            if player._lastActiveTime <= threshold:
+                try:
+                    nvwave.NVDAHelper.localLib.wasPlay_idle(player._player)
+                    if player._enableTrimmingLeadingSilence:
+                        player.startTrimmingLeadingSilence()
+                except OSError:
+                    nvwave.log.exception("Error calling wasPlay_idle")
+                player._lastActiveTime = None
+            else:
+                stillActiveStream = True
+        if stillActiveStream:
+            cls._scheduleIdleCheck()
+
+    _safe_idle_check.__doc__ = original.__doc__
+    nvwave.WavePlayer._idleCheck = _safe_idle_check
+    setattr(nvwave.WavePlayer, sentinel_attr, True)
+
+
+_patch_waveplayer_idle_check()
 
 # Audio handling -----------------------------------------------------------------
 class AudioWorker(threading.Thread):
