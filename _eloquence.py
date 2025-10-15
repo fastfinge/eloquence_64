@@ -229,24 +229,33 @@ class EloquenceHostClient:
         self._audio_worker: Optional[AudioWorker] = None
         self._running = threading.Event()
         self._command_lock = threading.Lock()
+        self._start_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
         if self._host:
             return
-        addon_dir = os.path.abspath(os.path.dirname(__file__))
-        authkey = os.urandom(AUTH_KEY_BYTES)
-        listener = Listener(("127.0.0.1", 0), authkey=authkey)
-        address = listener.address
-        port = address[1]
-        cmd = list(self._resolve_host_executable(addon_dir))
-        cmd.extend(["--address", f"127.0.0.1:{port}", "--authkey", authkey.hex(), "--log-dir", addon_dir])
-        LOGGER.info("Launching Eloquence host: %s", cmd)
-        proc = subprocess.Popen(cmd, cwd=addon_dir)
-        conn = listener.accept()
-        self._host = HostProcess(process=proc, connection=conn, listener=listener)
-        self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
-        self._receiver.start()
+        with self._start_lock:
+            if self._host:
+                return
+            addon_dir = os.path.abspath(os.path.dirname(__file__))
+            authkey = os.urandom(AUTH_KEY_BYTES)
+            listener = Listener(("127.0.0.1", 0), authkey=authkey)
+            address = listener.address
+            port = address[1]
+            cmd = list(self._resolve_host_executable(addon_dir))
+            cmd.extend(["--address", f"127.0.0.1:{port}", "--authkey", authkey.hex(), "--log-dir", addon_dir])
+            LOGGER.info("Launching Eloquence host: %s", cmd)
+            proc = subprocess.Popen(cmd, cwd=addon_dir)
+            try:
+                conn = listener.accept()
+            except Exception:
+                proc.terminate()
+                listener.close()
+                raise
+            self._host = HostProcess(process=proc, connection=conn, listener=listener)
+            self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
+            self._receiver.start()
 
     def _resolve_host_executable(self, addon_dir: str) -> Sequence[str]:
         override = os.environ.get("ELOQUENCE_HOST_COMMAND")
