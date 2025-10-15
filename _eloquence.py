@@ -26,6 +26,43 @@ HOST_SCRIPT = "host_eloquence32.py"
 AUTH_KEY_BYTES = 16
 
 onIndexReached = None
+_queue_handler_module = None
+
+
+def _dispatch_index_callback(value: Optional[int]) -> None:
+    """Invoke the registered index callback on NVDA's event queue when available."""
+
+    global _queue_handler_module
+    if not onIndexReached:
+        return
+    if _queue_handler_module is None:
+        try:
+            # queueHandler is only available inside NVDA. Import lazily so
+            # development environments without NVDA modules can still import
+            # this helper.
+            import queueHandler  # type: ignore
+
+            _queue_handler_module = queueHandler
+        except Exception:
+            _queue_handler_module = False
+    if _queue_handler_module:
+        try:
+            _queue_handler_module.queueFunction(
+                _queue_handler_module.eventQueue, _safe_invoke_index, value
+            )
+            return
+        except Exception:
+            LOGGER.exception("Failed to queue index callback")
+    _safe_invoke_index(value)
+
+
+def _safe_invoke_index(value: Optional[int]) -> None:
+    if not onIndexReached:
+        return
+    try:
+        onIndexReached(value)
+    except Exception:
+        LOGGER.exception("Index callback failed")
 
 
 def _patch_waveplayer_idle_check() -> None:
@@ -107,21 +144,14 @@ class AudioWorker(threading.Thread):
                 break
             data, index, is_final = chunk
             self._prepare_for_chunk(is_final)
+            if index is not None:
+                self._invoke_index_callback(index)
             if not data:
-                if index is not None:
-                    self._invoke_index_callback(index)
                 if is_final:
                     self._emit_final()
                 self._queue.task_done()
                 continue
-            on_done = None
-            if index is not None:
-
-                def _callback(i=index):
-                    self._invoke_index_callback(i)
-
-                on_done = _callback
-            wrapped_on_done = self._make_on_done(on_done, is_final)
+            wrapped_on_done = self._make_on_done(None, is_final)
             tries = 0
             fed = False
             while tries < 10:
@@ -174,11 +204,7 @@ class AudioWorker(threading.Thread):
         return _on_done
 
     def _invoke_index_callback(self, value: Optional[int]) -> None:
-        if onIndexReached:
-            try:
-                onIndexReached(value)
-            except Exception:
-                LOGGER.exception("Index callback failed")
+        _dispatch_index_callback(value)
 
 
 AudioChunk = Tuple[bytes, Optional[int], bool]
