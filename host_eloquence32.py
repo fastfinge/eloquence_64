@@ -71,7 +71,7 @@ def configure_logging(log_dir: Optional[str]) -> None:
     """Initialise logging for the helper."""
     logging.basicConfig(
         filename=os.path.join(log_dir, "eloquence-host.log") if log_dir else None,
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
