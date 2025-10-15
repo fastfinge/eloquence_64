@@ -4,7 +4,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
-import sys
+import sys 
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 import queue
 import shlex
@@ -27,62 +27,6 @@ AUTH_KEY_BYTES = 16
 
 onIndexReached = None
 
-
-def _patch_waveplayer_idle_check() -> None:
-    """Ensure nvwave's idle check iterates over a stable snapshot."""
-
-    sentinel_attr = "_eloquenceIdleCheckPatched"
-    if getattr(nvwave.WavePlayer, sentinel_attr, False):
-        return
-
-    original = nvwave.WavePlayer._idleCheck
-
-    @classmethod
-    def _safe_idle_check(cls):
-        """Thread-safe wrapper around nvwave.WavePlayer._idleCheck."""
-
-        cls._isIdleCheckPending = False
-        threshold = time.time() - cls._IDLE_TIMEOUT
-        stillActiveStream = False
-        # Copy the dictionary to avoid race conditions when the weak reference
-        # set is modified by another thread while we iterate over it.
-        debug_nvwave = getattr(nvwave, "_isDebugForNvWave", lambda: False)
-        for attempt in range(3):
-            try:
-                players = list(cls._instances.copy().values())
-            except RuntimeError:
-                if debug_nvwave():
-                    LOGGER.debug("Retrying idle check snapshot due to concurrent modification")
-                continue
-            break
-        else:
-            if debug_nvwave():
-                LOGGER.debug("Falling back to empty idle check snapshot due to repeated failures")
-            players = []
-
-        for player in players:
-            if player is None or not player._lastActiveTime or player._isPaused:
-                continue
-            if player._lastActiveTime <= threshold:
-                try:
-                    nvwave.NVDAHelper.localLib.wasPlay_idle(player._player)
-                    if player._enableTrimmingLeadingSilence:
-                        player.startTrimmingLeadingSilence()
-                except OSError:
-                    nvwave.log.exception("Error calling wasPlay_idle")
-                player._lastActiveTime = None
-            else:
-                stillActiveStream = True
-        if stillActiveStream:
-            cls._scheduleIdleCheck()
-
-    _safe_idle_check.__doc__ = original.__doc__
-    nvwave.WavePlayer._idleCheck = _safe_idle_check
-    setattr(nvwave.WavePlayer, sentinel_attr, True)
-
-
-_patch_waveplayer_idle_check()
-
 # Audio handling -----------------------------------------------------------------
 class AudioWorker(threading.Thread):
     _CHANNELS = 1
@@ -94,8 +38,10 @@ class AudioWorker(threading.Thread):
         self._player = player
         self._queue = audio_queue
         self._running = True
-        self._final_lock = threading.Lock()
-        self._final_emitted = False
+        self._player_lock = threading.RLock()
+        self._stopping = False
+        self._idle_timer = None
+        self._idle_lock = threading.Lock()
 
     def run(self) -> None:
         while self._running:
@@ -106,12 +52,11 @@ class AudioWorker(threading.Thread):
             if chunk is None:
                 break
             data, index, is_final = chunk
-            self._prepare_for_chunk(is_final)
             if not data:
                 if index is not None:
                     self._invoke_index_callback(index)
                 if is_final:
-                    self._emit_final()
+                    self._schedule_idle()
                 self._queue.task_done()
                 continue
             on_done = None
@@ -124,42 +69,74 @@ class AudioWorker(threading.Thread):
             wrapped_on_done = self._make_on_done(on_done, is_final)
             tries = 0
             fed = False
-            while tries < 10:
+            while tries < 10 and not self._stopping:
                 try:
-                    self._player.feed(data, onDone=wrapped_on_done)
-                    if tries:
-                        LOGGER.warning("Audio feed retries=%d", tries)
-                    fed = True
+                    with self._player_lock:
+                        if not self._stopping and self._player:
+                            self._player.feed(data, onDone=wrapped_on_done)
+                            if tries:
+                                LOGGER.warning("Audio feed retries=%d", tries)
+                            fed = True
+                            break
+                except FileNotFoundError:
+                    # Sound device disappeared, recreate player
+                    LOGGER.warning("Sound device not found, recreating player")
+                    with self._player_lock:
+                        if self._player:
+                            try:
+                                self._player.close()
+                            except Exception:
+                                pass
+                            # Will be recreated by parent
                     break
                 except Exception:
                     LOGGER.exception("WavePlayer feed failed, retrying")
-                    self._player.idle()
+                    try:
+                        with self._player_lock:
+                            if not self._stopping and self._player:
+                                self._player.idle()
+                    except Exception:
+                        LOGGER.exception("WavePlayer idle failed during retry")
                     time.sleep(0.02)
                     tries += 1
-            if not fed and is_final:
-                self._emit_final()
+            if not fed and is_final and not self._stopping:
+                self._schedule_idle()
             self._queue.task_done()
 
     def stop(self) -> None:
+        self._stopping = True
         self._running = False
+        # Cancel any pending idle timer
+        with self._idle_lock:
+            if self._idle_timer:
+                self._idle_timer.cancel()
+                self._idle_timer = None
         self._queue.put(None)
 
-    def _prepare_for_chunk(self, is_final: bool) -> None:
-        with self._final_lock:
-            if self._final_emitted or not is_final:
-                self._final_emitted = False
+    def _schedule_idle(self) -> None:
+        """Schedule idle() to be called after a delay."""
+        if self._stopping:
+            return
+        with self._idle_lock:
+            # Cancel any existing timer
+            if self._idle_timer:
+                self._idle_timer.cancel()
+            # Schedule new idle
+            self._idle_timer = threading.Timer(0.3, self._idle_player)
+            self._idle_timer.start()
+            LOGGER.debug("Idle scheduled for 0.3s from now")
 
-    def _emit_final(self) -> None:
-        with self._final_lock:
-            if self._final_emitted:
-                return
-            self._final_emitted = True
-        if self._player:
-            try:
-                self._player.idle()
-            except Exception:
-                LOGGER.exception("WavePlayer idle failed")
-        self._invoke_index_callback(None)
+    def _idle_player(self) -> None:
+        """Called by timer after speech is complete."""
+        with self._player_lock:
+            if self._player and not self._stopping:
+                try:
+                    self._player.idle()
+                except Exception:
+                    LOGGER.exception("WavePlayer idle failed")
+        # Notify done speaking
+        if not self._stopping:
+            self._invoke_index_callback(None)
 
     def _make_on_done(self, callback, is_final: bool):
         def _on_done() -> None:
@@ -169,8 +146,7 @@ class AudioWorker(threading.Thread):
             except Exception:
                 LOGGER.exception("Index callback failed")
             if is_final:
-                self._emit_final()
-
+                self._schedule_idle()
         return _on_done
 
     def _invoke_index_callback(self, value: Optional[int]) -> None:
@@ -203,6 +179,8 @@ class EloquenceHostClient:
         self._audio_worker: Optional[AudioWorker] = None
         self._running = threading.Event()
         self._command_lock = threading.Lock()
+        self._stop_lock = threading.RLock()
+        self._speaking = False
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
@@ -262,10 +240,17 @@ class EloquenceHostClient:
         while True:
             try:
                 message = connection.recv()
-            except EOFError:
+            except (EOFError, ConnectionAbortedError, OSError):
                 LOGGER.info("Host connection closed")
                 for msg_id, event in list(self._pending.items()):
                     self._responses[msg_id] = {"error": "connectionClosed"}
+                    event.set()
+                self._pending.clear()
+                break
+            except Exception:
+                LOGGER.exception("Unexpected error in receiver loop")
+                for msg_id, event in list(self._pending.items()):
+                    self._responses[msg_id] = {"error": "receiverException"}
                     event.set()
                 self._pending.clear()
                 break
@@ -288,8 +273,10 @@ class EloquenceHostClient:
             is_final = bool(payload.get("final", False))
             self._audio_queue.put((data, index, is_final))
         elif event == "stopped":
-            if self._player:
-                self._player.stop()
+            # Don't call player.stop() from this thread to avoid race conditions
+            # The stop() method will handle player cleanup properly
+            LOGGER.debug("Host reported stopped event")
+            self._speaking = False
         else:
             LOGGER.debug("Unhandled host event %s", event)
 
@@ -301,29 +288,55 @@ class EloquenceHostClient:
             msg_id = next(self._id_counter)
             event = threading.Event()
             self._pending[msg_id] = event
-            self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
-            event.wait()
-            response = self._responses.pop(msg_id)
+            try:
+                self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
+            except Exception:
+                # Clean up if send fails
+                self._pending.pop(msg_id, None)
+                raise
+            # Wait for response with timeout to avoid infinite blocking
+            if not event.wait(timeout=5.0):
+                self._pending.pop(msg_id, None)
+                LOGGER.error("Command %s timed out after 5 seconds", command)
+                raise RuntimeError(f"Command {command} timed out")
+            response = self._responses.pop(msg_id, {"error": "no response received"})
             if "error" in response:
                 raise RuntimeError(response["error"])
             return response.get("payload", {})
 
     def stop(self) -> None:
-        if not self._host:
-            return
-        try:
-            self.send_command("stop")
-        finally:
+        with self._stop_lock:
+            if not self._host:
+                return
+            # First, signal the audio worker to stop processing
+            if self._audio_worker:
+                self._audio_worker._stopping = True
+                # Cancel any pending idle timer
+                with self._audio_worker._idle_lock:
+                    if self._audio_worker._idle_timer:
+                        self._audio_worker._idle_timer.cancel()
+                        self._audio_worker._idle_timer = None
+            # Clear the audio queue before stopping the host
             self._clear_audio_queue()
-            if self._player:
-                try:
-                    self._player.stop()
-                except Exception:
-                    LOGGER.exception("WavePlayer stop failed")
-                try:
-                    self._player.idle()
-                except Exception:
-                    LOGGER.exception("WavePlayer idle failed")
+            # Stop the host synthesis - send without waiting for response for instant cancellation
+            try:
+                msg_id = next(self._id_counter)
+                self._host.connection.send({"type": "command", "id": msg_id, "command": "stop", "payload": {}})
+            except Exception:
+                LOGGER.exception("Failed to send stop command to host")
+            # Stop the player asynchronously to avoid blocking on buffer drain
+            if self._audio_worker and self._player:
+                # Capture references before starting thread
+                player = self._player
+                def _async_stop():
+                    try:
+                        player.stop()
+                    except Exception:
+                        LOGGER.exception("WavePlayer stop failed")
+                threading.Thread(target=_async_stop, daemon=True).start()
+            # Reset the stopping flag immediately so new speech can play
+            if self._audio_worker:
+                self._audio_worker._stopping = False
 
     def _clear_audio_queue(self) -> None:
         cleared = 0
@@ -346,10 +359,7 @@ class EloquenceHostClient:
     def shutdown(self) -> None:
         if not self._host:
             return
-        try:
-            self.send_command("delete")
-        except Exception:
-            LOGGER.exception("Failed to delete host cleanly")
+        # Stop audio worker first
         if self._audio_worker:
             self._audio_worker.stop()
             self._audio_worker.join(timeout=1)
@@ -357,12 +367,33 @@ class EloquenceHostClient:
         if self._player:
             self._player.close()
             self._player = None
-        self._host.connection.close()
-        self._host.listener.close()
-        self._host.process.terminate()
+        # Send delete command to host (this will cause receiver to get EOFError)
+        try:
+            self.send_command("delete")
+        except Exception:
+            LOGGER.exception("Failed to delete host cleanly")
+        # Wait for receiver thread to finish (it will get EOFError and exit)
         if self._receiver:
-            self._receiver.join(timeout=1)
+            self._receiver.join(timeout=2)
             self._receiver = None
+        # Now close connections and terminate process
+        try:
+            self._host.connection.close()
+        except Exception:
+            pass
+        try:
+            self._host.listener.close()
+        except Exception:
+            pass
+        try:
+            self._host.process.terminate()
+            self._host.process.wait(timeout=2)
+        except Exception:
+            LOGGER.exception("Failed to terminate host process")
+            try:
+                self._host.process.kill()
+            except Exception:
+                pass
         self._host = None
 
 
@@ -411,12 +442,18 @@ def initialize(indexCallback=None):
 
 
 def speak(text):
-    text_bytes = text.encode("mbcs")
-    _client.send_command("addText", text=text_bytes)
+    try:
+        text_bytes = text.encode("mbcs")
+        _client.send_command("addText", text=text_bytes)
+    except Exception:
+        LOGGER.exception("Failed to send text to synthesizer")
 
 
 def index(idx):
-    _client.send_command("insertIndex", value=int(idx))
+    try:
+        _client.send_command("insertIndex", value=int(idx))
+    except Exception:
+        LOGGER.exception("Failed to insert index")
 
 
 def cmdProsody(param, multiplier):
@@ -429,12 +466,17 @@ def cmdProsody(param, multiplier):
 
 
 def synth():
-    _client.send_command("synthesize")
+    try:
+        _client.send_command("synthesize")
+    except Exception:
+        LOGGER.exception("Failed to start synthesis")
 
 
 def stop():
-    _client.stop()
+    # First clear the synthesis queue to prevent new commands from being processed
     _clear_synth_queue()
+    # Then stop the client which will stop the host and clear audio
+    _client.stop()
 
 
 def _clear_synth_queue() -> None:
@@ -461,8 +503,12 @@ def terminate():
 
 
 def set_voice(vl):
-    response = _client.send_command("setParam", paramId=9, value=int(vl))
-    params.update(response.get("params", {}))
+    try:
+        response = _client.send_command("setParam", paramId=9, value=int(vl))
+        params.update(response.get("params", {}))
+        voice_params.update(response.get("voiceParams", {}))
+    except Exception:
+        LOGGER.exception("Failed to set voice")
 
 
 def getVParam(pr):
@@ -470,16 +516,22 @@ def getVParam(pr):
 
 
 def setVParam(pr, vl, temporary=False):
-    response = _client.send_command(
-        "setVoiceParam", paramId=int(pr), value=int(vl), temporary=bool(temporary)
-    )
-    if not temporary:
-        voice_params[pr] = response.get("voiceParams", {}).get(pr, vl)
+    try:
+        response = _client.send_command(
+            "setVoiceParam", paramId=int(pr), value=int(vl), temporary=bool(temporary)
+        )
+        if not temporary:
+            voice_params[pr] = response.get("voiceParams", {}).get(pr, vl)
+    except Exception:
+        LOGGER.exception("Failed to set voice parameter")
 
 
 def setVariant(v):
-    response = _client.send_command("copyVoice", variant=int(v))
-    voice_params.update(response.get("voiceParams", {}))
+    try:
+        response = _client.send_command("copyVoice", variant=int(v))
+        voice_params.update(response.get("voiceParams", {}))
+    except Exception:
+        LOGGER.exception("Failed to set variant")
 
 
 def process():
@@ -499,10 +551,15 @@ def _synth_worker_loop() -> None:
             break
         try:
             for func, args in lst:
+                # Check if we should stop before each command
+                if _synth_worker_stop.is_set():
+                    break
                 try:
                     func(*args)
                 except Exception:
                     LOGGER.exception("Synthesis command failed")
+        except Exception:
+            LOGGER.exception("Unexpected error in synth worker")
         finally:
             synth_queue.task_done()
 

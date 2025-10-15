@@ -15,14 +15,13 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
+import sys 
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
+import threading
 from dataclasses import dataclass
 from io import BytesIO
 from multiprocessing.connection import Client
 from typing import Dict, Optional
-
-import threading
 
 import ctypes
 from ctypes import (
@@ -47,6 +46,7 @@ VLM = 7
 
 # Synthesis state parameters.
 ECI_INPUT_TYPE = 1
+ECI_SYNTH_MODE = 8  # 0=Sentence, 1=Manual
 
 # A sentinel index value used by Eloquence to mark the end of a chunk.
 FINAL_INDEX = 0xFFFF
@@ -89,9 +89,6 @@ class HostConfig:
 class EloquenceRuntime:
     """Wraps access to the 32-bit Eloquence DLL."""
 
-    _instance_lock = threading.Lock()
-    _active_instance: Optional["EloquenceRuntime"] = None
-
     def __init__(self, conn: Client, config: HostConfig):
         self._conn = conn
         self._config = config
@@ -109,6 +106,9 @@ class EloquenceRuntime:
         self._params: Dict[int, int] = {}
         self._voice_params: Dict[int, int] = {}
         self._speaking = False
+        self._stop_requested = False
+        self._speaking_lock = threading.Lock()
+        self._synth_thread = None
 
     # ------------------------------------------------------------------
     # Communication helpers
@@ -128,20 +128,7 @@ class EloquenceRuntime:
     # Eloquence management
     def start(self) -> None:
         LOGGER.debug("Starting Eloquence runtime")
-        with self._instance_lock:
-            if (
-                EloquenceRuntime._active_instance is not None
-                and EloquenceRuntime._active_instance is not self
-            ):
-                raise RuntimeError("Eloquence runtime already active")
-            EloquenceRuntime._active_instance = self
-        try:
-            self._load_dll()
-        except Exception:
-            with self._instance_lock:
-                if EloquenceRuntime._active_instance is self:
-                    EloquenceRuntime._active_instance = None
-            raise
+        self._load_dll()
 
     def _load_dll(self) -> None:
         LOGGER.info("Loading Eloquence library from %s", self._config.eci_path)
@@ -220,40 +207,56 @@ class EloquenceRuntime:
 
     def synthesize(self) -> None:
         LOGGER.debug("Starting synthesis")
-        self._audio_buffer.seek(0)
-        self._audio_buffer.truncate(0)
-        self._speaking = True
-        try:
-            self._dll.eciSynthesize(self._handle)
-            if not self._dll.eciSynchronize(self._handle):
-                LOGGER.warning("eciSynchronize reported failure")
-        finally:
-            self._speaking = False
-            # Ensure any buffered audio is pushed even if the final index was not
-            # delivered (for example if the controller stops early).
-            self._flush_audio()
+        
+        def _synth_worker():
+            with self._speaking_lock:
+                self._speaking = True
+                self._stop_requested = False
+            try:
+                self._dll.eciSynthesize(self._handle)
+                # eciSynchronize blocks until done or eciStop is called
+                if not self._dll.eciSynchronize(self._handle):
+                    LOGGER.debug("eciSynchronize returned failure (likely stopped)")
+            except Exception:
+                LOGGER.exception("Synthesis thread exception")
+            finally:
+                with self._speaking_lock:
+                    if not self._stop_requested:
+                        self._speaking = False
+        
+        # Start synthesis in background thread so it doesn't block RPC
+        self._synth_thread = threading.Thread(target=_synth_worker, daemon=True)
+        self._synth_thread.start()
 
     def stop(self) -> None:
         LOGGER.debug("Stopping synthesis")
+        with self._speaking_lock:
+            self._stop_requested = True
+            was_speaking = self._speaking
+            self._speaking = False
+        # eciStop interrupts eciSynchronize immediately
+        # Don't wait for thread - it's daemon and will finish on its own
         self._dll.eciStop(self._handle)
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
-        self._speaking = False
-        self._send_event("stopped")
+        if was_speaking:
+            self._send_event("stopped")
 
     def delete(self) -> None:
         LOGGER.debug("Deleting Eloquence handle")
         if self._handle:
             self._dll.eciDelete(self._handle)
             self._handle = None
-        with self._instance_lock:
-            if EloquenceRuntime._active_instance is self:
-                EloquenceRuntime._active_instance = None
 
     def set_param(self, param_id: int, value: int) -> None:
         LOGGER.debug("Setting param %s=%s", param_id, value)
         self._dll.eciSetParam(self._handle, param_id, value)
         self._params[param_id] = value
+        # When changing voice (param 9), update all voice parameters
+        if param_id == 9:
+            LOGGER.debug("Voice changed, reading voice parameters")
+            for param in (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH):
+                self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
 
     def set_voice_param(self, param_id: int, value: int, temporary: bool = False) -> None:
         LOGGER.debug("Setting voice param %s=%s temporary=%s", param_id, value, temporary)
@@ -273,23 +276,35 @@ class EloquenceRuntime:
     # ------------------------------------------------------------------
     # Callbacks from Eloquence
     def _on_callback(self, handle, message, length, user_data):
-        if not self._speaking:
-            return 2
+        with self._speaking_lock:
+            if not self._speaking or self._stop_requested:
+                return 2
         LOGGER.debug("Callback message=%s length=%s", message, length)
         if message == 0:
+            # Audio data callback
             if self._audio_buffer.tell() >= self._samples * 2:
                 self._flush_audio()
             data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))
             self._audio_buffer.write(data)
         elif message == 2:
+            # Index callback
             is_final = length == FINAL_INDEX
             index_value = length if not is_final else None
             self._flush_audio(index_value, force=True, final=is_final)
             if is_final:
-                self._speaking = False
+                with self._speaking_lock:
+                    self._speaking = False
         return 1
 
     def _flush_audio(self, index: Optional[int] = None, force: bool = False, final: bool = False) -> None:
+        # Check if we've been stopped
+        with self._speaking_lock:
+            if self._stop_requested and not final:
+                # Don't send audio if we've been stopped, unless it's the final chunk
+                self._audio_buffer.seek(0)
+                self._audio_buffer.truncate(0)
+                return
+        
         if self._audio_buffer.tell() == 0:
             if force or final:
                 self._send_event("audio", data=b"", index=index, final=final)
@@ -304,6 +319,7 @@ class HostController:
     def __init__(self, conn: Client):
         self._conn = conn
         self._runtime: Optional[EloquenceRuntime] = None
+        self._should_exit = False
         self._handlers = {
             "initialize": self._handle_initialize,
             "addText": self._handle_add_text,
@@ -318,7 +334,7 @@ class HostController:
 
     def serve_forever(self) -> None:
         LOGGER.info("Host controller waiting for commands")
-        while True:
+        while not self._should_exit:
             try:
                 message = self._conn.recv()
             except (EOFError, ConnectionError, OSError) as exc:
@@ -341,6 +357,9 @@ class HostController:
             try:
                 payload = handler(**message.get("payload", {}))
                 self._conn.send({"type": "response", "id": msg_id, "payload": payload})
+                # Exit after sending response to delete command
+                if command == "delete" and self._should_exit:
+                    break
             except Exception as exc:
                 LOGGER.exception("Command %s failed", command)
                 self._conn.send({"type": "response", "id": msg_id, "error": str(exc)})
@@ -348,16 +367,6 @@ class HostController:
     # ------------------------------------------------------------------
     # Command handlers
     def _handle_initialize(self, **payload):
-        if self._runtime is not None:
-            try:
-                self._runtime.stop()
-            except Exception:
-                LOGGER.exception("Failed to stop existing runtime before reinitializing")
-            try:
-                self._runtime.delete()
-            except Exception:
-                LOGGER.exception("Failed to delete existing runtime before reinitializing")
-            self._runtime = None
         config = HostConfig(
             eci_path=payload["eciPath"],
             data_directory=payload["dataDirectory"],
@@ -389,7 +398,7 @@ class HostController:
     def _handle_delete(self):
         if self._runtime:
             self._runtime.delete()
-        self._runtime = None
+        self._should_exit = True
         return {"status": "ok"}
 
     def _handle_set_param(self, paramId: int, value: int):
