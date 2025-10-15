@@ -186,14 +186,21 @@ class AudioWorker(threading.Thread):
                 continue
             data, index, is_final = chunk[1]  # type: ignore[assignment]
             self._prepare_for_chunk(is_final)
-            if index is not None:
-                self._invoke_index_callback(index)
             if not data:
+                if index is not None:
+                    self._invoke_index_callback(index)
                 if is_final:
                     self._emit_final()
                 self._queue.task_done()
                 continue
-            wrapped_on_done = self._make_on_done(None, is_final)
+            on_done = None
+            if index is not None:
+
+                def _callback(i=index):
+                    self._invoke_index_callback(i)
+
+                on_done = _callback
+            wrapped_on_done = self._make_on_done(on_done, is_final)
             tries = 0
             fed = False
             while tries < 10:
