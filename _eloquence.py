@@ -131,6 +131,9 @@ class AudioWorker(threading.Thread):
     _CHANNELS = 1
     _BITS_PER_SAMPLE = 16
     _SAMPLE_RATE = 11025
+    _MAX_INFLIGHT_FEEDS = 24
+    _CAPACITY_IDLE_INTERVAL = 0.01
+    _CAPACITY_IDLE_TIMEOUT = 2.0
 
     def __init__(
         self,
@@ -197,6 +200,7 @@ class AudioWorker(threading.Thread):
                     self._mark_final_pending()
                 self._queue.task_done()
                 continue
+            self._wait_for_capacity()
             feed_id = next(self._feed_ids)
             wrapped_on_done = self._make_on_done(is_final, feed_id)
             tries = 0
@@ -293,6 +297,23 @@ class AudioWorker(threading.Thread):
             player.idle()
         except Exception:
             LOGGER.exception("WavePlayer idle failed")
+
+    def _wait_for_capacity(self) -> None:
+        deadline = time.time() + self._CAPACITY_IDLE_TIMEOUT
+        while self._running:
+            with self._state_lock:
+                inflight = len(self._inflight_feeds)
+            if inflight < self._MAX_INFLIGHT_FEEDS:
+                return
+            self._idle_player()
+            if time.time() >= deadline:
+                LOGGER.warning(
+                    "WavePlayer backlog still %d feeds after %.1fs; continuing",
+                    inflight,
+                    self._CAPACITY_IDLE_TIMEOUT,
+                )
+                return
+            time.sleep(self._CAPACITY_IDLE_INTERVAL)
 
     def enqueue_control(self, func: Callable[[], None], wait: bool = False) -> None:
         self._ready.wait()
