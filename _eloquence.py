@@ -61,11 +61,10 @@ class AudioWorker(threading.Thread):
                 continue
             on_done = None
             if index is not None:
-
-                def _callback(i=index):
-                    self._invoke_index_callback(i)
-
-                on_done = _callback
+                # Dispatch index notifications immediately so NVDA's say-all
+                # controller can enqueue subsequent text fragments without
+                # waiting for audio playback to finish.
+                self._invoke_index_callback(index)
             wrapped_on_done = self._make_on_done(on_done, is_final)
             tries = 0
             fed = False
