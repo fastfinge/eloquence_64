@@ -134,19 +134,32 @@ class AudioWorker(threading.Thread):
 
     def __init__(
         self,
-        player: nvwave.WavePlayer,
+        player_factory: Callable[[], nvwave.WavePlayer],
         audio_queue: "queue.Queue[Optional[AudioQueueItem]]",
     ):
         super().__init__(daemon=True)
-        self._player = player
+        self._player_factory = player_factory
         self._queue = audio_queue
         self._running = True
         self._final_lock = threading.Lock()
         self._final_emitted = False
         self._thread_id: Optional[int] = None
+        self._ready = threading.Event()
+        self._player: Optional[nvwave.WavePlayer] = None
+        self._player_init_error: Optional[BaseException] = None
 
     def run(self) -> None:
         self._thread_id = threading.get_ident()
+        try:
+            player = self._player_factory()
+        except BaseException as exc:
+            LOGGER.exception("Failed to create WavePlayer")
+            self._player_init_error = exc
+            self._ready.set()
+            self._running = False
+            return
+        self._player = player
+        self._ready.set()
         while self._running:
             try:
                 chunk = self._queue.get(timeout=0.1)
@@ -199,10 +212,20 @@ class AudioWorker(threading.Thread):
                 self._emit_final()
             self._queue.task_done()
         self._thread_id = None
+        self._player = None
 
     def stop(self) -> None:
         self._running = False
         self._queue.put(None)
+
+    def wait_until_ready(self, timeout: Optional[float] = None) -> nvwave.WavePlayer:
+        if not self._ready.wait(timeout):
+            raise RuntimeError("Timed out waiting for audio worker")
+        if self._player_init_error:
+            raise RuntimeError("WavePlayer failed to initialize") from self._player_init_error
+        if not self._player:
+            raise RuntimeError("WavePlayer unavailable")
+        return self._player
 
     def _prepare_for_chunk(self, is_final: bool) -> None:
         with self._final_lock:
@@ -242,6 +265,10 @@ class AudioWorker(threading.Thread):
             LOGGER.exception("WavePlayer idle failed")
 
     def enqueue_control(self, func: Callable[[], None], wait: bool = False) -> None:
+        self._ready.wait()
+        if not self._player:
+            LOGGER.debug("Ignoring WavePlayer control command: player unavailable")
+            return
         if threading.get_ident() == self._thread_id:
             try:
                 func()
@@ -249,10 +276,7 @@ class AudioWorker(threading.Thread):
                 LOGGER.exception("WavePlayer control command failed")
             return
         if not self.is_alive() or not self._running:
-            try:
-                func()
-            except Exception:
-                LOGGER.exception("WavePlayer control command failed")
+            LOGGER.debug("Dropping WavePlayer control command: worker not running")
             return
         event: Optional[threading.Event] = threading.Event() if wait else None
         self._queue.put(("control", (func, event)))
@@ -336,14 +360,35 @@ class EloquenceHostClient:
         if version_year >= 2025:
             device = config.conf["audio"]["outputDevice"]
             ducking = True if config.conf["audio"]["audioDuckingMode"] else False
-            player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, wantDucking=ducking)
+            def create_player() -> nvwave.WavePlayer:
+                return nvwave.WavePlayer(
+                    1,
+                    11025,
+                    16,
+                    outputDevice=device,
+                    wantDucking=ducking,
+                )
         else:
             device = config.conf["speech"]["outputDevice"]
             nvwave.WavePlayer.MIN_BUFFER_MS = 1500
-            player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
+            def create_player() -> nvwave.WavePlayer:
+                return nvwave.WavePlayer(
+                    1,
+                    11025,
+                    16,
+                    outputDevice=device,
+                    buffered=True,
+                )
+        worker = AudioWorker(create_player, self._audio_queue)
+        worker.start()
+        try:
+            player = worker.wait_until_ready(timeout=5)
+        except Exception:
+            worker.stop()
+            worker.join(timeout=1)
+            raise
+        self._audio_worker = worker
         self._player = player
-        self._audio_worker = AudioWorker(player, self._audio_queue)
-        self._audio_worker.start()
 
     def pause_player(self, switch: bool) -> None:
         player = self._player
@@ -452,10 +497,7 @@ class EloquenceHostClient:
         if worker and worker.is_alive():
             worker.enqueue_control(action, wait=wait)
             return
-        try:
-            action()
-        except Exception:
-            LOGGER.exception("WavePlayer control command failed")
+        LOGGER.debug("Skipping WavePlayer command because audio worker is unavailable")
 
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
