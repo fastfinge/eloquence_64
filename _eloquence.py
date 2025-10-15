@@ -143,8 +143,10 @@ class AudioWorker(threading.Thread):
         self._running = True
         self._final_lock = threading.Lock()
         self._final_emitted = False
+        self._thread_id: Optional[int] = None
 
     def run(self) -> None:
+        self._thread_id = threading.get_ident()
         while self._running:
             try:
                 chunk = self._queue.get(timeout=0.1)
@@ -196,6 +198,7 @@ class AudioWorker(threading.Thread):
             if not fed and is_final:
                 self._emit_final()
             self._queue.task_done()
+        self._thread_id = None
 
     def stop(self) -> None:
         self._running = False
@@ -211,11 +214,7 @@ class AudioWorker(threading.Thread):
             if self._final_emitted:
                 return
             self._final_emitted = True
-        if self._player:
-            try:
-                self._player.idle()
-            except Exception:
-                LOGGER.exception("WavePlayer idle failed")
+        self.enqueue_control(self._idle_player)
         self._invoke_index_callback(None)
 
     def _make_on_done(self, callback, is_final: bool):
@@ -233,7 +232,22 @@ class AudioWorker(threading.Thread):
     def _invoke_index_callback(self, value: Optional[int]) -> None:
         _dispatch_index_callback(value)
 
+    def _idle_player(self) -> None:
+        player = self._player
+        if not player:
+            return
+        try:
+            player.idle()
+        except Exception:
+            LOGGER.exception("WavePlayer idle failed")
+
     def enqueue_control(self, func: Callable[[], None], wait: bool = False) -> None:
+        if threading.get_ident() == self._thread_id:
+            try:
+                func()
+            except Exception:
+                LOGGER.exception("WavePlayer control command failed")
+            return
         if not self.is_alive() or not self._running:
             try:
                 func()
