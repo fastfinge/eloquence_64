@@ -124,6 +124,7 @@ _patch_waveplayer_idle_check()
 AudioChunk = Tuple[bytes, Optional[int], bool]
 ControlPayload = Tuple[Callable[[], None], Optional[threading.Event]]
 AudioQueueItem = Tuple[str, Union[AudioChunk, ControlPayload]]
+CommandQueueItem = Tuple[int, str, Dict[str, Any], threading.Event]
 
 
 class AudioWorker(threading.Thread):
@@ -262,16 +263,21 @@ class EloquenceHostClient:
         self._audio_queue: "queue.Queue[Optional[AudioQueueItem]]" = queue.Queue()
         self._player: Optional[nvwave.WavePlayer] = None
         self._audio_worker: Optional[AudioWorker] = None
-        self._running = threading.Event()
-        self._command_lock = threading.Lock()
         self._start_lock = threading.Lock()
+        self._command_queue: "queue.Queue[Optional[CommandQueueItem]]" = queue.Queue()
+        self._command_thread: Optional[threading.Thread] = None
+        self._command_thread_stop = threading.Event()
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
         if self._host:
+            if not self._command_thread or not self._command_thread.is_alive():
+                self._start_command_thread()
             return
         with self._start_lock:
             if self._host:
+                if not self._command_thread or not self._command_thread.is_alive():
+                    self._start_command_thread()
                 return
             addon_dir = os.path.abspath(os.path.dirname(__file__))
             authkey = os.urandom(AUTH_KEY_BYTES)
@@ -291,6 +297,7 @@ class EloquenceHostClient:
             self._host = HostProcess(process=proc, connection=conn, listener=listener)
             self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
             self._receiver.start()
+            self._start_command_thread()
 
     def _resolve_host_executable(self, addon_dir: str) -> Sequence[str]:
         override = os.environ.get("ELOQUENCE_HOST_COMMAND")
@@ -374,16 +381,20 @@ class EloquenceHostClient:
     def send_command(self, command: str, **payload: Any) -> Dict[str, Any]:
         if not self._host:
             raise RuntimeError("Host not started")
-        with self._command_lock:
-            msg_id = next(self._id_counter)
-            event = threading.Event()
-            self._pending[msg_id] = event
-            self._host.connection.send({"type": "command", "id": msg_id, "command": command, "payload": payload})
-            event.wait()
-            response = self._responses.pop(msg_id)
-            if "error" in response:
-                raise RuntimeError(response["error"])
-            return response.get("payload", {})
+        if not self._command_thread or not self._command_thread.is_alive():
+            raise RuntimeError("Command dispatcher not running")
+        msg_id = next(self._id_counter)
+        response_ready = threading.Event()
+        self._pending[msg_id] = response_ready
+        ack = threading.Event()
+        self._command_queue.put((msg_id, command, payload, ack))
+        if not ack.wait(timeout=5):
+            raise RuntimeError("Command dispatcher unresponsive")
+        response_ready.wait()
+        response = self._responses.pop(msg_id)
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        return response.get("payload", {})
 
     def stop(self) -> None:
         if not self._host:
@@ -455,6 +466,7 @@ class EloquenceHostClient:
             worker.stop()
             worker.join(timeout=1)
             self._audio_worker = None
+        self._stop_command_thread()
         self._host.connection.close()
         self._host.listener.close()
         self._host.process.terminate()
@@ -462,6 +474,63 @@ class EloquenceHostClient:
             self._receiver.join(timeout=1)
             self._receiver = None
         self._host = None
+
+    def _start_command_thread(self) -> None:
+        if self._command_thread and self._command_thread.is_alive():
+            return
+        self._command_thread_stop.clear()
+        self._command_queue = queue.Queue()
+        self._command_thread = threading.Thread(
+            target=self._command_loop,
+            name="EloquenceCommandDispatcher",
+            daemon=True,
+        )
+        self._command_thread.start()
+
+    def _stop_command_thread(self) -> None:
+        thread = self._command_thread
+        if not thread:
+            return
+        self._command_thread_stop.set()
+        self._command_queue.put(None)
+        thread.join(timeout=1)
+        if thread.is_alive():
+            LOGGER.warning("Command dispatcher failed to terminate cleanly")
+        self._command_thread = None
+        self._command_thread_stop.clear()
+        for msg_id, event in list(self._pending.items()):
+            self._responses[msg_id] = {"error": "shutdown"}
+            event.set()
+        self._pending.clear()
+        self._command_queue = queue.Queue()
+
+    def _command_loop(self) -> None:
+        while True:
+            try:
+                item = self._command_queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._command_thread_stop.is_set():
+                    break
+                continue
+            if item is None:
+                self._command_queue.task_done()
+                break
+            msg_id, command, payload, ack = item
+            try:
+                if not self._host:
+                    raise RuntimeError("Host not started")
+                self._host.connection.send(
+                    {"type": "command", "id": msg_id, "command": command, "payload": payload}
+                )
+            except Exception as exc:
+                LOGGER.exception("Failed to dispatch command %s", command)
+                self._responses[msg_id] = {"error": str(exc)}
+                event = self._pending.pop(msg_id, None)
+                if event:
+                    event.set()
+            finally:
+                ack.set()
+                self._command_queue.task_done()
 
 
 _client = EloquenceHostClient()
