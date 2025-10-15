@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.connection import Listener
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 import config
 import nvwave
@@ -27,6 +27,147 @@ HOST_SCRIPT = "host_eloquence32.py"
 AUTH_KEY_BYTES = 16
 
 onIndexReached = None
+
+
+@dataclass
+class _AudioTask:
+    kind: str
+    generation: int
+    data: bytes = b""
+    index: Optional[int] = None
+    is_final: bool = False
+
+
+class AudioWorker(threading.Thread):
+    def __init__(self, player: nvwave.WavePlayer) -> None:
+        super().__init__(name="EloquenceAudioWorker", daemon=True)
+        self._player = player
+        self._tasks: "queue.Queue[_AudioTask]" = queue.Queue()
+        self._state_lock = threading.Lock()
+        self._generation = 0
+        self._awaiting_final = False
+        self._final_generation = -1
+
+    # ------------------------------------------------------------------
+    def submit_chunk(self, data: bytes, index: Optional[int], is_final: bool) -> None:
+        with self._state_lock:
+            generation = self._generation
+        self._tasks.put(_AudioTask("chunk", generation, data, index, is_final))
+
+    def request_stop(self) -> None:
+        with self._state_lock:
+            self._generation += 1
+            generation = self._generation
+            self._awaiting_final = False
+            self._final_generation = -1
+        self._tasks.put(_AudioTask("stop", generation))
+
+    def shutdown(self) -> None:
+        self.request_stop()
+        self._tasks.put(_AudioTask("shutdown", -1))
+        if threading.current_thread() is not self and self.ident is not None:
+            self.join(timeout=1)
+
+    # ------------------------------------------------------------------
+    def run(self) -> None:
+        while True:
+            task = self._tasks.get()
+            try:
+                if task.kind == "chunk":
+                    self._handle_chunk(task)
+                elif task.kind == "complete":
+                    self._handle_completion(task)
+                elif task.kind == "stop":
+                    self._handle_stop(task)
+                elif task.kind == "shutdown":
+                    self._handle_stop(task)
+                    break
+                else:
+                    LOGGER.warning("Unknown audio task %s", task.kind)
+            except Exception:
+                LOGGER.exception("Audio worker task failed")
+            finally:
+                if task.kind == "shutdown":
+                    break
+
+    # ------------------------------------------------------------------
+    def _handle_chunk(self, task: _AudioTask) -> None:
+        with self._state_lock:
+            current_gen = self._generation
+            if task.generation != current_gen:
+                return
+            if task.is_final:
+                self._awaiting_final = True
+                self._final_generation = task.generation
+
+        if not task.data:
+            self._handle_completion(_AudioTask("complete", task.generation, index=task.index, is_final=task.is_final))
+            return
+
+        def _on_done(idx: Optional[int] = task.index, final: bool = task.is_final, gen: int = task.generation) -> None:
+            self._tasks.put(_AudioTask("complete", gen, index=idx, is_final=final))
+
+        try:
+            self._player.feed(task.data, onDone=_on_done)
+        except Exception:
+            LOGGER.exception("WavePlayer feed failed")
+            self._handle_completion(_AudioTask("complete", task.generation, index=task.index, is_final=task.is_final))
+
+    def _handle_completion(self, task: _AudioTask) -> None:
+        with self._state_lock:
+            current_gen = self._generation
+            awaiting_final = self._awaiting_final
+            final_generation = self._final_generation
+        if task.generation != current_gen and task.generation != final_generation:
+            return
+        if task.index is not None and task.generation == current_gen:
+            self._queue_index_callback(task.index)
+        if task.is_final and awaiting_final and task.generation == final_generation:
+            self._finalize(task.generation)
+
+    def _handle_stop(self, task: _AudioTask) -> None:
+        with self._state_lock:
+            if task.generation >= 0 and task.generation > self._generation:
+                self._generation = task.generation
+            self._awaiting_final = False
+            self._final_generation = -1
+        try:
+            self._player.stop()
+        except Exception:
+            LOGGER.exception("WavePlayer stop failed")
+        try:
+            self._player.idle()
+        except Exception:
+            LOGGER.exception("WavePlayer idle failed")
+
+    def _finalize(self, generation: int) -> None:
+        with self._state_lock:
+            if not self._awaiting_final or self._final_generation != generation:
+                return
+            self._awaiting_final = False
+            self._final_generation = -1
+        try:
+            self._player.idle()
+        except Exception:
+            LOGGER.exception("WavePlayer idle failed")
+        self._queue_index_callback(None)
+
+    def _queue_index_callback(self, value: Optional[int]) -> None:
+        if not onIndexReached:
+            return
+
+        def _invoke() -> None:
+            try:
+                onIndexReached(value)
+            except Exception:
+                LOGGER.exception("Index callback failed")
+
+        try:
+            queueHandler.queueFunction(queueHandler.eventQueue, _invoke)
+        except Exception:
+            LOGGER.exception("Failed to queue index callback")
+            _invoke()
+
 
 # RPC client ---------------------------------------------------------------------
 @dataclass
@@ -44,7 +185,7 @@ class EloquenceHostClient:
         self._receiver: Optional[threading.Thread] = None
         self._id_counter = itertools.count(1)
         self._player: Optional[nvwave.WavePlayer] = None
-        self._awaiting_final = False
+        self._audio_worker: Optional[AudioWorker] = None
         self._command_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._id_lock = threading.Lock()
@@ -96,6 +237,8 @@ class EloquenceHostClient:
             nvwave.WavePlayer.MIN_BUFFER_MS = 1500
             player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
         self._player = player
+        self._audio_worker = AudioWorker(player)
+        self._audio_worker.start()
 
     # ------------------------------------------------------------------
     def _receiver_loop(self) -> None:
@@ -131,76 +274,17 @@ class EloquenceHostClient:
             data = payload.get("data", b"")
             index = payload.get("index")
             is_final = bool(payload.get("final", False))
-            self._queue_player_action(
-                "feed",
-                lambda player, d=data, idx=index, final=is_final: self._process_audio_chunk(player, d, idx, final),
-            )
+            worker = self._audio_worker
+            if worker:
+                worker.submit_chunk(data, index, is_final)
+            else:
+                LOGGER.debug("Dropping audio chunk because audio worker is not available")
         elif event == "stopped":
-            def _stop_player(player: nvwave.WavePlayer) -> None:
-                try:
-                    player.stop()
-                finally:
-                    self._awaiting_final = False
-
-            self._queue_player_action("stop", _stop_player)
+            worker = self._audio_worker
+            if worker:
+                worker.request_stop()
         else:
             LOGGER.debug("Unhandled host event %s", event)
-
-    def _process_audio_chunk(
-        self,
-        player: nvwave.WavePlayer,
-        data: bytes,
-        index: Optional[int],
-        is_final: bool,
-    ) -> None:
-        if is_final:
-            self._awaiting_final = True
-
-        if not data:
-            if index is not None:
-                self._invoke_index_callback(index)
-            if is_final:
-                self._finalize_playback(player)
-            return
-
-        def _finish_chunk() -> None:
-            if index is not None:
-                self._invoke_index_callback(index)
-            if is_final:
-                self._finalize_playback(player)
-
-        def _on_done() -> None:
-            try:
-                queueHandler.queueFunction(queueHandler.eventQueue, _finish_chunk)
-            except Exception:
-                LOGGER.exception("Failed to queue audio completion callback")
-                _finish_chunk()
-
-        try:
-            player.feed(data, onDone=_on_done)
-        except Exception:
-            LOGGER.exception("WavePlayer feed failed")
-            if index is not None:
-                self._invoke_index_callback(index)
-            if is_final:
-                self._finalize_playback(player)
-
-    def _finalize_playback(self, player: nvwave.WavePlayer) -> None:
-        if not self._awaiting_final:
-            return
-        self._awaiting_final = False
-        try:
-            player.idle()
-        except Exception:
-            LOGGER.exception("WavePlayer idle failed")
-        self._invoke_index_callback(None)
-
-    def _invoke_index_callback(self, value: Optional[int]) -> None:
-        if onIndexReached:
-            try:
-                onIndexReached(value)
-            except Exception:
-                LOGGER.exception("Index callback failed")
 
     # ------------------------------------------------------------------
     def send_command(self, command: str, **payload: Any) -> Dict[str, Any]:
@@ -231,19 +315,8 @@ class EloquenceHostClient:
         try:
             self.send_command("stop")
         finally:
-            def _stop_and_idle(player: nvwave.WavePlayer) -> None:
-                try:
-                    player.stop()
-                except Exception:
-                    LOGGER.exception("WavePlayer stop failed")
-                try:
-                    player.idle()
-                except Exception:
-                    LOGGER.exception("WavePlayer idle failed")
-                self._awaiting_final = False
-
-            self._queue_player_action("stop", _stop_and_idle)
-            self._awaiting_final = False
+            if self._audio_worker:
+                self._audio_worker.request_stop()
 
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
@@ -253,10 +326,14 @@ class EloquenceHostClient:
             self.send_command("delete")
         except Exception:
             LOGGER.exception("Failed to delete host cleanly")
+        if self._audio_worker:
+            self._audio_worker.shutdown()
+            if self._audio_worker.is_alive():
+                LOGGER.warning("Audio worker failed to terminate cleanly")
+            self._audio_worker = None
         if self._player:
             self._player.close()
             self._player = None
-        self._awaiting_final = False
         self._host.connection.close()
         self._host.listener.close()
         self._host.process.terminate()
@@ -264,22 +341,6 @@ class EloquenceHostClient:
             self._receiver.join(timeout=1)
             self._receiver = None
         self._host = None
-
-    def _queue_player_action(self, action_name: str, action: Callable[[nvwave.WavePlayer], None]) -> None:
-        player = self._player
-        if not player:
-            return
-
-        def _run() -> None:
-            try:
-                action(player)
-            except Exception:
-                LOGGER.exception("WavePlayer %s failed", action_name)
-
-        try:
-            queueHandler.queueFunction(queueHandler.eventQueue, _run)
-        except Exception:
-            LOGGER.exception("Failed to queue WavePlayer %s call", action_name)
 
 
 _client = EloquenceHostClient()
