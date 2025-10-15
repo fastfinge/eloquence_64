@@ -126,6 +126,8 @@ ControlPayload = Tuple[Callable[[], None], Optional[threading.Event]]
 AudioQueueItem = Tuple[str, Union[AudioChunk, ControlPayload]]
 CommandQueueItem = Tuple[int, str, Dict[str, Any], threading.Event]
 
+_AUDIO_BACKLOG_LIMIT = 8
+
 
 class AudioWorker(threading.Thread):
     _CHANNELS = 1
@@ -315,6 +317,30 @@ class AudioWorker(threading.Thread):
                 return
             time.sleep(self._CAPACITY_IDLE_INTERVAL)
 
+    def wait_for_backlog(self, limit: int, timeout: Optional[float] = None) -> None:
+        if limit <= 0:
+            return
+        deadline = time.time() + timeout if timeout else None
+        start = time.time()
+        while self._running:
+            with self._state_lock:
+                inflight = len(self._inflight_feeds)
+            with self._queue.mutex:
+                queue_backlog = self._queue.unfinished_tasks
+            total = inflight + queue_backlog
+            if total <= limit:
+                return
+            self._idle_player()
+            if deadline and time.time() >= deadline:
+                LOGGER.warning(
+                    "Audio backlog still %d (limit %d) after %.1fs; continuing",
+                    total,
+                    limit,
+                    time.time() - start,
+                )
+                return
+            time.sleep(self._CAPACITY_IDLE_INTERVAL)
+
     def enqueue_control(self, func: Callable[[], None], wait: bool = False) -> None:
         self._ready.wait()
         if not self._player:
@@ -356,6 +382,7 @@ class EloquenceHostClient:
         self._command_queue: "queue.Queue[Optional[CommandQueueItem]]" = queue.Queue()
         self._command_thread: Optional[threading.Thread] = None
         self._command_thread_stop = threading.Event()
+        self._audio_backlog_limit = _AUDIO_BACKLOG_LIMIT
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
@@ -517,6 +544,15 @@ class EloquenceHostClient:
             if player:
                 self._execute_on_player(player.stop, wait=True)
                 self._execute_on_player(player.idle, wait=True)
+
+    def wait_for_audio_capacity(self, limit: Optional[int] = None, timeout: Optional[float] = None) -> None:
+        worker = self._audio_worker
+        if not worker or not worker.is_alive():
+            return
+        backlog_limit = limit if limit is not None else self._audio_backlog_limit
+        if backlog_limit <= 0:
+            return
+        worker.wait_for_backlog(backlog_limit, timeout=timeout)
 
     def _clear_audio_queue(self) -> None:
         cleared = 0
@@ -771,6 +807,7 @@ def _synth_worker_loop() -> None:
             synth_queue.task_done()
             break
         try:
+            _client.wait_for_audio_capacity(timeout=2.0)
             for func, args in lst:
                 try:
                     func(*args)
