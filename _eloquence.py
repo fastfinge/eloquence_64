@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.connection import Listener
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Sequence, Set, Tuple, Union
 
 import config
 import nvwave
@@ -147,6 +147,10 @@ class AudioWorker(threading.Thread):
         self._ready = threading.Event()
         self._player: Optional[nvwave.WavePlayer] = None
         self._player_init_error: Optional[BaseException] = None
+        self._state_lock = threading.Lock()
+        self._feed_ids = itertools.count(1)
+        self._inflight_feeds: Set[int] = set()
+        self._pending_final_waiting: Set[int] = set()
 
     def run(self) -> None:
         self._thread_id = threading.get_ident()
@@ -186,21 +190,15 @@ class AudioWorker(threading.Thread):
                 continue
             data, index, is_final = chunk[1]  # type: ignore[assignment]
             self._prepare_for_chunk(is_final)
+            if index is not None:
+                self._invoke_index_callback(index)
             if not data:
-                if index is not None:
-                    self._invoke_index_callback(index)
                 if is_final:
-                    self._emit_final()
+                    self._mark_final_pending()
                 self._queue.task_done()
                 continue
-            on_done = None
-            if index is not None:
-
-                def _callback(i=index):
-                    self._invoke_index_callback(i)
-
-                on_done = _callback
-            wrapped_on_done = self._make_on_done(on_done, is_final)
+            feed_id = next(self._feed_ids)
+            wrapped_on_done = self._make_on_done(is_final, feed_id)
             tries = 0
             fed = False
             while tries < 10:
@@ -215,8 +213,11 @@ class AudioWorker(threading.Thread):
                     self._player.idle()
                     time.sleep(0.02)
                     tries += 1
-            if not fed and is_final:
-                self._emit_final()
+            if fed:
+                with self._state_lock:
+                    self._inflight_feeds.add(feed_id)
+            elif is_final:
+                self._mark_final_pending()
             self._queue.task_done()
         self._thread_id = None
         self._player = None
@@ -247,17 +248,39 @@ class AudioWorker(threading.Thread):
         self.enqueue_control(self._idle_player)
         self._invoke_index_callback(None)
 
-    def _make_on_done(self, callback, is_final: bool):
+    def _make_on_done(self, is_final: bool, feed_id: int):
         def _on_done() -> None:
             try:
-                if callback:
-                    callback()
+                self._on_feed_done(is_final, feed_id)
             except Exception:
-                LOGGER.exception("Index callback failed")
-            if is_final:
-                self._emit_final()
+                LOGGER.exception("Audio finalization failed")
 
         return _on_done
+
+    def _on_feed_done(self, is_final: bool, feed_id: int) -> None:
+        emit_final = False
+        with self._state_lock:
+            self._inflight_feeds.discard(feed_id)
+            if is_final:
+                emit_final = True
+                self._pending_final_waiting.clear()
+            elif self._pending_final_waiting:
+                self._pending_final_waiting.discard(feed_id)
+                if not self._pending_final_waiting:
+                    emit_final = True
+        if emit_final:
+            self._emit_final()
+
+    def _mark_final_pending(self) -> None:
+        emit_now = False
+        with self._state_lock:
+            if not self._inflight_feeds:
+                emit_now = True
+                self._pending_final_waiting.clear()
+            else:
+                self._pending_final_waiting = set(self._inflight_feeds)
+        if emit_now:
+            self._emit_final()
 
     def _invoke_index_callback(self, value: Optional[int]) -> None:
         _dispatch_index_callback(value)
