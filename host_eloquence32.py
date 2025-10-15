@@ -97,7 +97,7 @@ class EloquenceRuntime:
         self._dictionary_handle = None
         self._callback = Callback(self._on_callback)
         self._audio_buffer = BytesIO()
-        self._samples = 3300
+        self._samples = 128  # Much smaller buffer like the C++ project
         # eciSetOutputBuffer expects a pointer to 16-bit PCM samples.  Using a
         # c_short array keeps the data in the correct format and avoids the
         # char* semantics of create_string_buffer which truncate at the first
@@ -198,15 +198,16 @@ class EloquenceRuntime:
     # ------------------------------------------------------------------
     # Public API invoked from the controller
     def add_text(self, text: bytes) -> None:
-        LOGGER.debug("Adding %d bytes of text", len(text))
+        LOGGER.info("ADD_TEXT: Adding %d bytes of text", len(text))
         self._dll.eciAddText(self._handle, text)
+        LOGGER.info("ADD_TEXT: text added")
 
     def insert_index(self, index: int) -> None:
         LOGGER.debug("Inserting index %s", index)
         self._dll.eciInsertIndex(self._handle, index)
 
     def synthesize(self) -> None:
-        LOGGER.debug("Starting synthesis")
+        LOGGER.info("SYNTHESIZE: Starting synthesis")
         
         def _synth_worker():
             with self._speaking_lock:
@@ -229,18 +230,22 @@ class EloquenceRuntime:
         self._synth_thread.start()
 
     def stop(self) -> None:
-        LOGGER.debug("Stopping synthesis")
+        LOGGER.info("STOP: Stopping synthesis")
         with self._speaking_lock:
             self._stop_requested = True
             was_speaking = self._speaking
             self._speaking = False
+            LOGGER.info("STOP: was_speaking=%s, stop_requested set", was_speaking)
         # eciStop interrupts eciSynchronize immediately
         # Don't wait for thread - it's daemon and will finish on its own
         self._dll.eciStop(self._handle)
+        LOGGER.info("STOP: eciStop called")
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
+        LOGGER.info("STOP: audio buffer cleared")
         if was_speaking:
             self._send_event("stopped")
+            LOGGER.info("STOP: sent 'stopped' event")
 
     def delete(self) -> None:
         LOGGER.debug("Deleting Eloquence handle")
@@ -281,16 +286,20 @@ class EloquenceRuntime:
                 return 2
         LOGGER.debug("Callback message=%s length=%s", message, length)
         if message == 0:
-            # Audio data callback
-            if self._audio_buffer.tell() >= self._samples * 2:
-                self._flush_audio()
+            # Audio data callback - send immediately without buffering
             data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))
-            self._audio_buffer.write(data)
+            # Send this chunk immediately to minimize latency
+            with self._speaking_lock:
+                if not self._stop_requested:
+                    self._send_event("audio", data=data, index=None, final=False)
         elif message == 2:
             # Index callback
             is_final = length == FINAL_INDEX
             index_value = length if not is_final else None
-            self._flush_audio(index_value, force=True, final=is_final)
+            # Send empty chunk with index marker
+            with self._speaking_lock:
+                if not self._stop_requested or is_final:
+                    self._send_event("audio", data=b"", index=index_value, final=is_final)
             if is_final:
                 with self._speaking_lock:
                     self._speaking = False
@@ -301,6 +310,7 @@ class EloquenceRuntime:
         with self._speaking_lock:
             if self._stop_requested and not final:
                 # Don't send audio if we've been stopped, unless it's the final chunk
+                LOGGER.info("FLUSH: Dropping audio (stopped), buffer had %d bytes", self._audio_buffer.tell())
                 self._audio_buffer.seek(0)
                 self._audio_buffer.truncate(0)
                 return
@@ -310,6 +320,7 @@ class EloquenceRuntime:
                 self._send_event("audio", data=b"", index=index, final=final)
             return
         payload = self._audio_buffer.getvalue()
+        LOGGER.info("FLUSH: Sending %d bytes of audio, index=%s, final=%s", len(payload), index, final)
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
         self._send_event("audio", data=payload, index=index, final=final)

@@ -25,7 +25,6 @@ HOST_EXECUTABLE = "eloquence_host32.exe"
 HOST_SCRIPT = "host_eloquence32.py"
 AUTH_KEY_BYTES = 16
 
-onIndexReached = None
 
 # Audio handling -----------------------------------------------------------------
 class AudioWorker(threading.Thread):
@@ -33,14 +32,14 @@ class AudioWorker(threading.Thread):
     _BITS_PER_SAMPLE = 16
     _SAMPLE_RATE = 11025
 
-    def __init__(self, player: nvwave.WavePlayer, audio_queue: "queue.Queue[Optional[AudioChunk]]"):
+    def __init__(self, player: nvwave.WavePlayer, queue: "queue.Queue[Optional[AudioChunk]]"):
         super().__init__(daemon=True)
         self._player = player
-        self._queue = audio_queue
+        self._queue = queue
         self._running = True
-        self._player_lock = threading.RLock()
         self._stopping = False
-        self._idle_timer = None
+        self._player_lock = threading.RLock()
+        self._idle_timer: Optional[threading.Timer] = None
         self._idle_lock = threading.Lock()
 
     def run(self) -> None:
@@ -51,6 +50,10 @@ class AudioWorker(threading.Thread):
                 continue
             if chunk is None:
                 break
+            # Check stopping flag IMMEDIATELY after getting chunk
+            if self._stopping:
+                self._queue.task_done()
+                continue
             data, index, is_final = chunk
             if not data:
                 if index is not None:
@@ -61,45 +64,21 @@ class AudioWorker(threading.Thread):
                 continue
             on_done = None
             if index is not None:
-                # Dispatch index notifications immediately so NVDA's say-all
-                # controller can enqueue subsequent text fragments without
-                # waiting for audio playback to finish.
-                self._invoke_index_callback(index)
+
+                def _callback(i=index):
+                    self._invoke_index_callback(i)
+
+                on_done = _callback
             wrapped_on_done = self._make_on_done(on_done, is_final)
-            tries = 0
-            fed = False
-            while tries < 10 and not self._stopping:
-                try:
-                    with self._player_lock:
-                        if not self._stopping and self._player:
-                            self._player.feed(data, onDone=wrapped_on_done)
-                            if tries:
-                                LOGGER.warning("Audio feed retries=%d", tries)
-                            fed = True
-                            break
-                except FileNotFoundError:
-                    # Sound device disappeared, recreate player
-                    LOGGER.warning("Sound device not found, recreating player")
-                    with self._player_lock:
-                        if self._player:
-                            try:
-                                self._player.close()
-                            except Exception:
-                                pass
-                            # Will be recreated by parent
-                    break
-                except Exception:
-                    LOGGER.exception("WavePlayer feed failed, retrying")
-                    try:
-                        with self._player_lock:
-                            if not self._stopping and self._player:
-                                self._player.idle()
-                    except Exception:
-                        LOGGER.exception("WavePlayer idle failed during retry")
-                    time.sleep(0.02)
-                    tries += 1
-            if not fed and is_final and not self._stopping:
-                self._schedule_idle()
+            # Feed directly - blocks if buffer is full
+            try:
+                with self._player_lock:
+                    if not self._stopping and self._player:
+                        self._player.feed(data, onDone=wrapped_on_done)
+            except FileNotFoundError:
+                LOGGER.warning("Sound device not found during feed")
+            except Exception:
+                LOGGER.exception("WavePlayer feed failed")
             self._queue.task_done()
 
     def stop(self) -> None:
@@ -127,13 +106,8 @@ class AudioWorker(threading.Thread):
 
     def _idle_player(self) -> None:
         """Called by timer after speech is complete."""
-        with self._player_lock:
-            if self._player and not self._stopping:
-                try:
-                    self._player.idle()
-                except Exception:
-                    LOGGER.exception("WavePlayer idle failed")
-        # Notify done speaking
+        # Do NOT call idle() - it blocks waiting for buffer to drain
+        # Just notify done speaking
         if not self._stopping:
             self._invoke_index_callback(None)
 
