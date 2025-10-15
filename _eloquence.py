@@ -13,7 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from multiprocessing.connection import Listener
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import config
 import nvwave
@@ -42,7 +42,8 @@ class AudioWorker(threading.Thread):
     def __init__(self, player: nvwave.WavePlayer) -> None:
         super().__init__(name="EloquenceAudioWorker", daemon=True)
         self._player = player
-        self._tasks: "queue.Queue[_AudioTask]" = queue.Queue()
+        self._tasks: "queue.PriorityQueue[Tuple[int, int, _AudioTask]]" = queue.PriorityQueue()
+        self._task_counter = itertools.count()
         self._state_lock = threading.Lock()
         self._generation = 0
         self._awaiting_final = False
@@ -52,7 +53,7 @@ class AudioWorker(threading.Thread):
     def submit_chunk(self, data: bytes, index: Optional[int], is_final: bool) -> None:
         with self._state_lock:
             generation = self._generation
-        self._tasks.put(_AudioTask("chunk", generation, data, index, is_final))
+        self._put_task(10, _AudioTask("chunk", generation, data, index, is_final))
 
     def request_stop(self) -> None:
         with self._state_lock:
@@ -60,18 +61,18 @@ class AudioWorker(threading.Thread):
             generation = self._generation
             self._awaiting_final = False
             self._final_generation = -1
-        self._tasks.put(_AudioTask("stop", generation))
+        self._put_task(0, _AudioTask("stop", generation))
 
     def shutdown(self) -> None:
         self.request_stop()
-        self._tasks.put(_AudioTask("shutdown", -1))
+        self._put_task(-10, _AudioTask("shutdown", -1))
         if threading.current_thread() is not self and self.ident is not None:
             self.join(timeout=1)
 
     # ------------------------------------------------------------------
     def run(self) -> None:
         while True:
-            task = self._tasks.get()
+            _priority, _counter, task = self._tasks.get()
             try:
                 if task.kind == "chunk":
                     self._handle_chunk(task)
@@ -91,6 +92,9 @@ class AudioWorker(threading.Thread):
                     break
 
     # ------------------------------------------------------------------
+    def _put_task(self, priority: int, task: _AudioTask) -> None:
+        self._tasks.put((priority, next(self._task_counter), task))
+
     def _handle_chunk(self, task: _AudioTask) -> None:
         with self._state_lock:
             current_gen = self._generation
@@ -101,17 +105,21 @@ class AudioWorker(threading.Thread):
                 self._final_generation = task.generation
 
         if not task.data:
-            self._handle_completion(_AudioTask("complete", task.generation, index=task.index, is_final=task.is_final))
+            self._handle_completion(
+                _AudioTask("complete", task.generation, index=task.index, is_final=task.is_final)
+            )
             return
 
         def _on_done(idx: Optional[int] = task.index, final: bool = task.is_final, gen: int = task.generation) -> None:
-            self._tasks.put(_AudioTask("complete", gen, index=idx, is_final=final))
+            self._put_task(-1, _AudioTask("complete", gen, index=idx, is_final=final))
 
         try:
             self._player.feed(task.data, onDone=_on_done)
         except Exception:
             LOGGER.exception("WavePlayer feed failed")
-            self._handle_completion(_AudioTask("complete", task.generation, index=task.index, is_final=task.is_final))
+            self._handle_completion(
+                _AudioTask("complete", task.generation, index=task.index, is_final=task.is_final)
+            )
 
     def _handle_completion(self, task: _AudioTask) -> None:
         with self._state_lock:
