@@ -126,10 +126,16 @@ class AudioWorker(threading.Thread):
     _BITS_PER_SAMPLE = 16
     _SAMPLE_RATE = 11025
 
-    def __init__(self, player: nvwave.WavePlayer, audio_queue: "queue.Queue[Optional[AudioChunk]]"):
+    def __init__(
+        self,
+        player: nvwave.WavePlayer,
+        audio_queue: "queue.Queue[Optional[AudioChunk]]",
+        player_lock: threading.RLock,
+    ):
         super().__init__(daemon=True)
         self._player = player
         self._queue = audio_queue
+        self._player_lock = player_lock
         self._running = True
         self._final_lock = threading.Lock()
         self._final_emitted = False
@@ -156,14 +162,16 @@ class AudioWorker(threading.Thread):
             fed = False
             while tries < 10:
                 try:
-                    self._player.feed(data, onDone=wrapped_on_done)
+                    with self._player_lock:
+                        self._player.feed(data, onDone=wrapped_on_done)
                     if tries:
                         LOGGER.warning("Audio feed retries=%d", tries)
                     fed = True
                     break
                 except Exception:
                     LOGGER.exception("WavePlayer feed failed, retrying")
-                    self._player.idle()
+                    with self._player_lock:
+                        self._player.idle()
                     time.sleep(0.02)
                     tries += 1
             if not fed and is_final:
@@ -186,7 +194,8 @@ class AudioWorker(threading.Thread):
             self._final_emitted = True
         if self._player:
             try:
-                self._player.idle()
+                with self._player_lock:
+                    self._player.idle()
             except Exception:
                 LOGGER.exception("WavePlayer idle failed")
         self._invoke_index_callback(None)
@@ -230,6 +239,7 @@ class EloquenceHostClient:
         self._running = threading.Event()
         self._command_lock = threading.Lock()
         self._start_lock = threading.Lock()
+        self._player_lock = threading.RLock()
 
     # ------------------------------------------------------------------
     def ensure_started(self) -> None:
@@ -286,8 +296,15 @@ class EloquenceHostClient:
             nvwave.WavePlayer.MIN_BUFFER_MS = 1500
             player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
         self._player = player
-        self._audio_worker = AudioWorker(player, self._audio_queue)
+        self._audio_worker = AudioWorker(player, self._audio_queue, self._player_lock)
         self._audio_worker.start()
+
+    def pause_player(self, switch: bool) -> None:
+        player = self._player
+        if not player:
+            return
+        with self._player_lock:
+            player.pause(switch)
 
     # ------------------------------------------------------------------
     def _receiver_loop(self) -> None:
@@ -324,7 +341,8 @@ class EloquenceHostClient:
             self._audio_queue.put((data, index, is_final))
         elif event == "stopped":
             if self._player:
-                self._player.stop()
+                with self._player_lock:
+                    self._player.stop()
         else:
             LOGGER.debug("Unhandled host event %s", event)
 
@@ -352,11 +370,13 @@ class EloquenceHostClient:
             self._clear_audio_queue()
             if self._player:
                 try:
-                    self._player.stop()
+                    with self._player_lock:
+                        self._player.stop()
                 except Exception:
                     LOGGER.exception("WavePlayer stop failed")
                 try:
-                    self._player.idle()
+                    with self._player_lock:
+                        self._player.idle()
                 except Exception:
                     LOGGER.exception("WavePlayer idle failed")
 
@@ -390,7 +410,8 @@ class EloquenceHostClient:
             self._audio_worker.join(timeout=1)
             self._audio_worker = None
         if self._player:
-            self._player.close()
+            with self._player_lock:
+                self._player.close()
             self._player = None
         self._host.connection.close()
         self._host.listener.close()
@@ -486,8 +507,7 @@ def _clear_synth_queue() -> None:
 
 
 def pause(switch):
-    if _client._player:
-        _client._player.pause(switch)
+    _client.pause_player(switch)
 
 
 def terminate():
