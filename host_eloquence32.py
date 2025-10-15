@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys 
+import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 from dataclasses import dataclass
 from io import BytesIO
 from multiprocessing.connection import Client
 from typing import Dict, Optional
+
+import threading
 
 import ctypes
 from ctypes import (
@@ -87,6 +89,9 @@ class HostConfig:
 class EloquenceRuntime:
     """Wraps access to the 32-bit Eloquence DLL."""
 
+    _instance_lock = threading.Lock()
+    _active_instance: Optional["EloquenceRuntime"] = None
+
     def __init__(self, conn: Client, config: HostConfig):
         self._conn = conn
         self._config = config
@@ -123,7 +128,20 @@ class EloquenceRuntime:
     # Eloquence management
     def start(self) -> None:
         LOGGER.debug("Starting Eloquence runtime")
-        self._load_dll()
+        with self._instance_lock:
+            if (
+                EloquenceRuntime._active_instance is not None
+                and EloquenceRuntime._active_instance is not self
+            ):
+                raise RuntimeError("Eloquence runtime already active")
+            EloquenceRuntime._active_instance = self
+        try:
+            self._load_dll()
+        except Exception:
+            with self._instance_lock:
+                if EloquenceRuntime._active_instance is self:
+                    EloquenceRuntime._active_instance = None
+            raise
 
     def _load_dll(self) -> None:
         LOGGER.info("Loading Eloquence library from %s", self._config.eci_path)
@@ -202,6 +220,8 @@ class EloquenceRuntime:
 
     def synthesize(self) -> None:
         LOGGER.debug("Starting synthesis")
+        self._audio_buffer.seek(0)
+        self._audio_buffer.truncate(0)
         self._speaking = True
         try:
             self._dll.eciSynthesize(self._handle)
@@ -226,6 +246,9 @@ class EloquenceRuntime:
         if self._handle:
             self._dll.eciDelete(self._handle)
             self._handle = None
+        with self._instance_lock:
+            if EloquenceRuntime._active_instance is self:
+                EloquenceRuntime._active_instance = None
 
     def set_param(self, param_id: int, value: int) -> None:
         LOGGER.debug("Setting param %s=%s", param_id, value)
@@ -325,6 +348,16 @@ class HostController:
     # ------------------------------------------------------------------
     # Command handlers
     def _handle_initialize(self, **payload):
+        if self._runtime is not None:
+            try:
+                self._runtime.stop()
+            except Exception:
+                LOGGER.exception("Failed to stop existing runtime before reinitializing")
+            try:
+                self._runtime.delete()
+            except Exception:
+                LOGGER.exception("Failed to delete existing runtime before reinitializing")
+            self._runtime = None
         config = HostConfig(
             eci_path=payload["eciPath"],
             data_directory=payload["dataDirectory"],
@@ -356,6 +389,7 @@ class HostController:
     def _handle_delete(self):
         if self._runtime:
             self._runtime.delete()
+        self._runtime = None
         return {"status": "ok"}
 
     def _handle_set_param(self, paramId: int, value: int):
