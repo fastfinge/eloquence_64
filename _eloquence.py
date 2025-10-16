@@ -32,10 +32,11 @@ class AudioWorker(threading.Thread):
     _BITS_PER_SAMPLE = 16
     _SAMPLE_RATE = 11025
 
-    def __init__(self, player: nvwave.WavePlayer, queue: "queue.Queue[Optional[AudioChunk]]"):
+    def __init__(self, player: nvwave.WavePlayer, queue: "queue.Queue[Optional[AudioChunk]]", client: "EloquenceHostClient"):
         super().__init__(daemon=True)
         self._player = player
         self._queue = queue
+        self._client = client
         self._running = True
         self._stopping = False
         self._player_lock = threading.RLock()
@@ -50,11 +51,10 @@ class AudioWorker(threading.Thread):
                 continue
             if chunk is None:
                 break
-            # Check stopping flag IMMEDIATELY after getting chunk
-            if self._stopping:
+            data, index, is_final, seq = chunk
+            if seq < self._client._sequence:
                 self._queue.task_done()
                 continue
-            data, index, is_final = chunk
             if not data:
                 if index is not None:
                     self._invoke_index_callback(index)
@@ -70,11 +70,16 @@ class AudioWorker(threading.Thread):
 
                 on_done = _callback
             wrapped_on_done = self._make_on_done(on_done, is_final)
+            # Early exit if stopping - avoids unnecessary lock acquisition
+            if self._stopping:
+                self._queue.task_done()
+                continue
             # Feed directly - blocks if buffer is full
             try:
                 with self._player_lock:
-                    if not self._stopping and self._player:
-                        self._player.feed(data, onDone=wrapped_on_done)
+                    if not self._stopping:
+                        if self._player:
+                            self._player.feed(data, onDone=wrapped_on_done)
             except FileNotFoundError:
                 LOGGER.warning("Sound device not found during feed")
             except Exception:
@@ -130,7 +135,7 @@ class AudioWorker(threading.Thread):
                 LOGGER.exception("Index callback failed")
 
 
-AudioChunk = Tuple[bytes, Optional[int], bool]
+AudioChunk = Tuple[bytes, Optional[int], bool, int]
 
 # RPC client ---------------------------------------------------------------------
 @dataclass
@@ -153,6 +158,8 @@ class EloquenceHostClient:
         self._running = threading.Event()
         self._command_lock = threading.Lock()
         self._stop_lock = threading.RLock()
+        self._sequence = 0
+        self._current_seq = 0
         self._speaking = False
 
     # ------------------------------------------------------------------
@@ -202,7 +209,7 @@ class EloquenceHostClient:
             nvwave.WavePlayer.MIN_BUFFER_MS = 1500
             player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
         self._player = player
-        self._audio_worker = AudioWorker(player, self._audio_queue)
+        self._audio_worker = AudioWorker(player, self._audio_queue, self)
         self._audio_worker.start()
 
     # ------------------------------------------------------------------
@@ -244,7 +251,8 @@ class EloquenceHostClient:
             data = payload.get("data", b"")
             index = payload.get("index")
             is_final = bool(payload.get("final", False))
-            self._audio_queue.put((data, index, is_final))
+            seq = self._current_seq
+            self._audio_queue.put((data, index, is_final, seq))
         elif event == "stopped":
             # Don't call player.stop() from this thread to avoid race conditions
             # The stop() method will handle player cleanup properly
@@ -278,55 +286,22 @@ class EloquenceHostClient:
             return response.get("payload", {})
 
     def stop(self) -> None:
-        with self._stop_lock:
-            if not self._host:
-                return
-            # First, signal the audio worker to stop processing
-            if self._audio_worker:
-                self._audio_worker._stopping = True
-                # Cancel any pending idle timer
-                with self._audio_worker._idle_lock:
-                    if self._audio_worker._idle_timer:
-                        self._audio_worker._idle_timer.cancel()
-                        self._audio_worker._idle_timer = None
-            # Clear the audio queue before stopping the host
-            self._clear_audio_queue()
-            # Stop the host synthesis - send without waiting for response for instant cancellation
-            try:
-                msg_id = next(self._id_counter)
-                self._host.connection.send({"type": "command", "id": msg_id, "command": "stop", "payload": {}})
-            except Exception:
-                LOGGER.exception("Failed to send stop command to host")
-            # Stop the player asynchronously to avoid blocking on buffer drain
-            if self._audio_worker and self._player:
-                # Capture references before starting thread
-                player = self._player
-                def _async_stop():
-                    try:
-                        player.stop()
-                    except Exception:
-                        LOGGER.exception("WavePlayer stop failed")
-                threading.Thread(target=_async_stop, daemon=True).start()
-            # Reset the stopping flag immediately so new speech can play
-            if self._audio_worker:
-                self._audio_worker._stopping = False
+        if not self._host:
+            return
+        self._sequence += 1
+        try:
+            self.send_command("stop")
+        finally:
+            if self._player:
+                try:
+                    self._player.stop()
+                except Exception:
+                    LOGGER.exception("WavePlayer stop failed")
+                try:
+                    self._player.idle()
+                except Exception:
+                    LOGGER.exception("WavePlayer idle failed")
 
-    def _clear_audio_queue(self) -> None:
-        cleared = 0
-        while True:
-            try:
-                item = self._audio_queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is None:
-                # Preserve sentinel used to shut down the worker thread.
-                self._audio_queue.task_done()
-                self._audio_queue.put(None)
-                break
-            self._audio_queue.task_done()
-            cleared += 1
-        if cleared:
-            LOGGER.debug("Dropped %d pending audio chunk(s)", cleared)
 
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
@@ -391,20 +366,38 @@ langs={'esm': (131073, 'Latin American Spanish'),
 'deu': (262144, 'German'),
 'ita': (327680, 'Italian'),
 'enu': (65536, 'American English'),
-'eng': (65537, 'British English')}
+'eng': (65537, 'British English'),
+'chs': (393216, 'Mandarin Chinese'),  # 0x00060000
+'jpn': (524288, 'Japanese'),  # 0x00080000
+'kor': (655360, 'Korean')}  # 0x000A0000
+
+# Language to encoding mapping for Asian languages
+# Using same codecs as IBMTTS which works correctly
+LANG_ENCODINGS = {
+    'chs': 'gb18030',  # Mandarin Chinese
+    'jpn': 'cp932',    # Japanese (Shift-JIS compatible)
+    'kor': 'cp949',    # Korean
+}
+
+# Voice ID to language code mapping (inverse of langs)
+VOICE_ID_TO_LANG = {voice_id: lang_code for lang_code, (voice_id, _) in langs.items()}
+
+# Current language code (updated when voice is set)
+_current_lang = 'enu'
     
 def initialize(indexCallback=None):
-    global onIndexReached
+    global onIndexReached, _current_lang
     _client.ensure_started()
     _client.initialize_audio()
     _ensure_synth_worker()
     onIndexReached = indexCallback
     eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
     voice_conf = config.conf.get("speech", {}).get("eci", {})
+    _current_lang = voice_conf.get("voice", "enu")
     payload = {
         "eciPath": eci_path,
         "dataDirectory": os.path.join(os.path.dirname(eci_path)),
-        "language": voice_conf.get("voice", "enu"),
+        "language": _current_lang,
         "enableAbbreviationDict": config.conf.get("speech", {}).get("eci", {}).get("ABRDICT", False),
         "enablePhrasePrediction": config.conf.get("speech", {}).get("eci", {}).get("phrasePrediction", False),
         "voiceVariant": int(voice_conf.get("variant", 0) or 0),
@@ -416,7 +409,9 @@ def initialize(indexCallback=None):
 
 def speak(text):
     try:
-        text_bytes = text.encode("mbcs")
+        # Use appropriate encoding for Asian languages
+        encoding = LANG_ENCODINGS.get(_current_lang, "mbcs")
+        text_bytes = text.encode(encoding, errors='replace')
         _client.send_command("addText", text=text_bytes)
     except Exception:
         LOGGER.exception("Failed to send text to synthesizer")
@@ -446,23 +441,8 @@ def synth():
 
 
 def stop():
-    # First clear the synthesis queue to prevent new commands from being processed
-    _clear_synth_queue()
-    # Then stop the client which will stop the host and clear audio
     _client.stop()
 
-
-def _clear_synth_queue() -> None:
-    cleared = 0
-    while True:
-        try:
-            synth_queue.get_nowait()
-        except queue.Empty:
-            break
-        synth_queue.task_done()
-        cleared += 1
-    if cleared:
-        LOGGER.debug("Dropped %d pending synthesis request(s)", cleared)
 
 
 def pause(switch):
@@ -476,10 +456,15 @@ def terminate():
 
 
 def set_voice(vl):
+    global _current_lang
     try:
-        response = _client.send_command("setParam", paramId=9, value=int(vl))
+        voice_id = int(vl)
+        response = _client.send_command("setParam", paramId=9, value=voice_id)
         params.update(response.get("params", {}))
         voice_params.update(response.get("voiceParams", {}))
+        # Update current language for proper encoding
+        _current_lang = VOICE_ID_TO_LANG.get(voice_id, 'enu')
+        LOGGER.debug("Voice changed to ID %d, language code: %s", voice_id, _current_lang)
     except Exception:
         LOGGER.exception("Failed to set voice")
 
@@ -514,25 +499,25 @@ def process():
 def _synth_worker_loop() -> None:
     while True:
         try:
-            lst = synth_queue.get(timeout=0.1)
+            item = synth_queue.get(timeout=0.1)
         except queue.Empty:
             if _synth_worker_stop.is_set():
                 break
             continue
-        if lst is None:
+        if item is None:
             synth_queue.task_done()
             break
+        lst, seq = item
+        if seq < _client._sequence:
+            synth_queue.task_done()
+            continue
+        _client._current_seq = seq
         try:
             for func, args in lst:
-                # Check if we should stop before each command
-                if _synth_worker_stop.is_set():
-                    break
                 try:
                     func(*args)
                 except Exception:
                     LOGGER.exception("Synthesis command failed")
-        except Exception:
-            LOGGER.exception("Unexpected error in synth worker")
         finally:
             synth_queue.task_done()
 

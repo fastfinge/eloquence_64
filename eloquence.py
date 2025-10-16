@@ -89,6 +89,9 @@ VOICE_BCP47 = {
  "deu": "de-DE",
  "ita": "it-IT",
  "fin": "fi-FI",
+ "chs": "zh-CN",  # Simplified Chinese
+ "jpn": "ja-JP",  # Japanese
+ "kor": "ko-KR",  # Korean
 }
 
 VOICE_CODE_TO_ID = {code: str(info[0]) for code, info in _eloquence.langs.items()}
@@ -244,7 +247,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
    outlist.append((_eloquence.speak, ('`p1.',)))
   outlist.append((_eloquence.index, (0xffff,)))
   outlist.append((_eloquence.synth,()))
-  _eloquence.synth_queue.put(outlist)
+  seq = _eloquence._client._sequence
+  _eloquence.synth_queue.put((outlist, seq))
   _eloquence.process()
 
  def xspeakText(self,text, should_pause=False):
@@ -256,7 +260,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
   if _eloquence.params[9] in ('deu', 262144): text = resub(german_fixes, text)
   #this converts to ansi for anticrash. If this breaks with foreign langs, we can remove it.
   #text = text.encode('mbcs')
-  text = normalizeText(text)
+  # Don't normalize text for Asian languages - they have multi-byte characters
+  if _eloquence.params[9] not in (393216, 524288, 655360):  # Not Chinese, Japanese, or Korean
+   text = normalizeText(text)
   if not self._backquoteVoiceTags:
    text=text.replace('`', ' ')
   text = "`vv%d %s" % (self.getVParam(_eloquence.vlm), text) #no embedded commands

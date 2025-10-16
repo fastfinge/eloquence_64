@@ -74,5 +74,30 @@ updateZip(FILE_NAME, "synthDrivers/eloquence/multiprocessing/syncronize.py", "mu
 updateZip(FILE_NAME, "synthDrivers/eloquence/multiprocessing/util.py", "multiprocessing/util.py")
 updateZip(FILE_NAME, "manifest.ini", "manifest.ini")
 updateZip(FILE_NAME, "synthDrivers/eloquence_host32.exe", "dist/eloquence_host32.exe")
+
+# Add Asian language files
+if os.path.exists("idiomas"):
+    print("Adding Asian language files...")
+    language_files = [
+        "chs.syn",
+        "chsrom.dll",
+        "jpn.syn",
+        "jpnrom.dll",
+        "kor.syn",
+        "korrom.dll"
+    ]
+    for lang_file in language_files:
+        source_path = os.path.join("idiomas", lang_file)
+        if os.path.exists(source_path):
+            updateZip(FILE_NAME, f"synthDrivers/eloquence/{lang_file}", source_path)
+            print(f"  Added {lang_file}")
+        else:
+            print(f"  Warning: {lang_file} not found in idiomas folder")
+
+# Add ECI.INI with Asian language support
+if os.path.exists("ECI.INI"):
+    print("Adding ECI.INI with Asian language support...")
+    updateZip(FILE_NAME, "synthDrivers/eloquence/ECI.INI", "ECI.INI")
+
 print(f"Created {FILE_NAME}")
 

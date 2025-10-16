@@ -1,7 +1,7 @@
 """32-bit host process for Eloquence synthesis.
 
 This module is executed as a separate helper process under a 32-bit
-Python runtime.  It loads the ETI-Eloquence DLL directly and exposes a
+    Python runtime.  It loads the ETI-Eloquence DLL directly and exposes a
 simple RPC protocol over a `multiprocessing.connection` channel so that
 64-bit NVDA builds can continue to make use of the original synthesizer.
 
@@ -62,6 +62,9 @@ LANGS: Dict[str, int] = {
     "ita": 327680,
     "enu": 65536,
     "eng": 65537,
+    "chs": 393216,  # Mandarin Chinese (0x00060000)
+    "jpn": 524288,  # Japanese (0x00080000)
+    "kor": 655360,  # Korean (0x000A0000)
 }
 
 LOGGER = logging.getLogger("eloquence.host")
@@ -71,7 +74,7 @@ def configure_logging(log_dir: Optional[str]) -> None:
     """Initialise logging for the helper."""
     logging.basicConfig(
         filename=os.path.join(log_dir, "eloquence-host.log") if log_dir else None,
-        level=logging.INFO,
+        level=logging.ERROR,
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
@@ -97,7 +100,7 @@ class EloquenceRuntime:
         self._dictionary_handle = None
         self._callback = Callback(self._on_callback)
         self._audio_buffer = BytesIO()
-        self._samples = 128  # Much smaller buffer like the C++ project
+        self._samples = 3300
         # eciSetOutputBuffer expects a pointer to 16-bit PCM samples.  Using a
         # c_short array keeps the data in the correct format and avoids the
         # char* semantics of create_string_buffer which truncate at the first
@@ -106,9 +109,6 @@ class EloquenceRuntime:
         self._params: Dict[int, int] = {}
         self._voice_params: Dict[int, int] = {}
         self._speaking = False
-        self._stop_requested = False
-        self._speaking_lock = threading.Lock()
-        self._synth_thread = None
 
     # ------------------------------------------------------------------
     # Communication helpers
@@ -132,16 +132,19 @@ class EloquenceRuntime:
 
     def _load_dll(self) -> None:
         LOGGER.info("Loading Eloquence library from %s", self._config.eci_path)
-        ini=open(self._config.eci_path[:-3]+"ini","r+")
-        ini.seek(12)
-        tml=ini.readline()
-        if tml[:-9] != self._config.eci_path[:-8]:
-          ini.seek(12)
-          tmp=ini.read()
-          ini.seek(12)
-          ini.write(tmp.replace(tml[:-9], self._config.eci_path[:-8]))
-          ini.truncate()
-        ini.close()
+        ini_path = self._config.eci_path[:-3]+"ini"
+        eloquence_dir = os.path.dirname(self._config.eci_path)
+        
+        # Read the entire INI file
+        with open(ini_path, "r") as f:
+            ini_content = f.read()
+        
+        # Replace C:\dummy\ with the actual eloquence directory
+        updated_content = ini_content.replace("C:\\dummy\\", eloquence_dir + "\\")
+        
+        # Write the updated content back
+        with open(ini_path, "w") as f:
+            f.write(updated_content)
         self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
         self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
         self._dll.eciRegisterCallback.restype = None
@@ -198,54 +201,33 @@ class EloquenceRuntime:
     # ------------------------------------------------------------------
     # Public API invoked from the controller
     def add_text(self, text: bytes) -> None:
-        LOGGER.info("ADD_TEXT: Adding %d bytes of text", len(text))
+        LOGGER.debug("Adding %d bytes of text", len(text))
         self._dll.eciAddText(self._handle, text)
-        LOGGER.info("ADD_TEXT: text added")
 
     def insert_index(self, index: int) -> None:
         LOGGER.debug("Inserting index %s", index)
         self._dll.eciInsertIndex(self._handle, index)
 
     def synthesize(self) -> None:
-        LOGGER.info("SYNTHESIZE: Starting synthesis")
-        
-        def _synth_worker():
-            with self._speaking_lock:
-                self._speaking = True
-                self._stop_requested = False
-            try:
-                self._dll.eciSynthesize(self._handle)
-                # eciSynchronize blocks until done or eciStop is called
-                if not self._dll.eciSynchronize(self._handle):
-                    LOGGER.debug("eciSynchronize returned failure (likely stopped)")
-            except Exception:
-                LOGGER.exception("Synthesis thread exception")
-            finally:
-                with self._speaking_lock:
-                    if not self._stop_requested:
-                        self._speaking = False
-        
-        # Start synthesis in background thread so it doesn't block RPC
-        self._synth_thread = threading.Thread(target=_synth_worker, daemon=True)
-        self._synth_thread.start()
+        LOGGER.debug("Starting synthesis")
+        self._speaking = True
+        try:
+            self._dll.eciSynthesize(self._handle)
+            if not self._dll.eciSynchronize(self._handle):
+                LOGGER.warning("eciSynchronize reported failure")
+        finally:
+            self._speaking = False
+            # Ensure any buffered audio is pushed even if the final index was not
+            # delivered (for example if the controller stops early).
+            self._flush_audio()
 
     def stop(self) -> None:
-        LOGGER.info("STOP: Stopping synthesis")
-        with self._speaking_lock:
-            self._stop_requested = True
-            was_speaking = self._speaking
-            self._speaking = False
-            LOGGER.info("STOP: was_speaking=%s, stop_requested set", was_speaking)
-        # eciStop interrupts eciSynchronize immediately
-        # Don't wait for thread - it's daemon and will finish on its own
+        LOGGER.debug("Stopping synthesis")
         self._dll.eciStop(self._handle)
-        LOGGER.info("STOP: eciStop called")
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
-        LOGGER.info("STOP: audio buffer cleared")
-        if was_speaking:
-            self._send_event("stopped")
-            LOGGER.info("STOP: sent 'stopped' event")
+        self._speaking = False
+        self._send_event("stopped")
 
     def delete(self) -> None:
         LOGGER.debug("Deleting Eloquence handle")
@@ -281,46 +263,30 @@ class EloquenceRuntime:
     # ------------------------------------------------------------------
     # Callbacks from Eloquence
     def _on_callback(self, handle, message, length, user_data):
-        with self._speaking_lock:
-            if not self._speaking or self._stop_requested:
-                return 2
+        if not self._speaking:
+            return 2
         LOGGER.debug("Callback message=%s length=%s", message, length)
         if message == 0:
             # Audio data callback - send immediately without buffering
             data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))
             # Send this chunk immediately to minimize latency
-            with self._speaking_lock:
-                if not self._stop_requested:
-                    self._send_event("audio", data=data, index=None, final=False)
+            self._send_event("audio", data=data, index=None, final=False)
         elif message == 2:
             # Index callback
             is_final = length == FINAL_INDEX
             index_value = length if not is_final else None
             # Send empty chunk with index marker
-            with self._speaking_lock:
-                if not self._stop_requested or is_final:
-                    self._send_event("audio", data=b"", index=index_value, final=is_final)
+            self._send_event("audio", data=b"", index=index_value, final=is_final)
             if is_final:
-                with self._speaking_lock:
-                    self._speaking = False
+                self._speaking = False
         return 1
 
     def _flush_audio(self, index: Optional[int] = None, force: bool = False, final: bool = False) -> None:
-        # Check if we've been stopped
-        with self._speaking_lock:
-            if self._stop_requested and not final:
-                # Don't send audio if we've been stopped, unless it's the final chunk
-                LOGGER.info("FLUSH: Dropping audio (stopped), buffer had %d bytes", self._audio_buffer.tell())
-                self._audio_buffer.seek(0)
-                self._audio_buffer.truncate(0)
-                return
-        
         if self._audio_buffer.tell() == 0:
             if force or final:
                 self._send_event("audio", data=b"", index=index, final=final)
             return
         payload = self._audio_buffer.getvalue()
-        LOGGER.info("FLUSH: Sending %d bytes of audio, index=%s, final=%s", len(payload), index, final)
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
         self._send_event("audio", data=payload, index=index, final=final)
