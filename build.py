@@ -99,5 +99,21 @@ if os.path.exists("ECI.INI"):
     print("Adding ECI.INI with Asian language support...")
     updateZip(FILE_NAME, "synthDrivers/eloquence/ECI.INI", "ECI.INI")
 
+# add dictionaries
+if os.path.exists("AltIBMTTSDictionaries"):
+    print("Adding dictionaries...")
+    dictionary_files = [
+        "enumain.dic",
+        "enuroot.dic",
+        "espmain.dic"
+    ]
+    for dictionary_file in dictionary_files:
+        source_path = os.path.join("AltIBMTTSDictionaries", dictionary_file)
+        if os.path.exists(source_path):
+            updateZip(FILE_NAME, f"synthDrivers/eloquence/{dictionary_file}", source_path)
+            print(f"  Added {dictionary_file}")
+        else:
+            print(f"  Warning: {dictionary_file} not found in dictionaries folder. Did you run git submodule init?")
+
 print(f"Created {FILE_NAME}")
 

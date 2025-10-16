@@ -113,21 +113,21 @@ class EloquenceRuntime:
     # ------------------------------------------------------------------
     # Communication helpers
     def _send_event(self, event: str, **payload: object) -> None:
-        LOGGER.debug("Sending event %s", event)
+        #LOGGER.debug("Sending event %s", event)
         try:
             self._conn.send({"type": "event", "event": event, "payload": payload})
         except Exception:
             LOGGER.exception("Failed to send event %s", event)
 
     def _send_response(self, msg_id: int, **payload: object) -> None:
-        LOGGER.debug("Sending response for %s", msg_id)
+        #LOGGER.debug("Sending response for %s", msg_id)
         self._conn.send({"type": "response", "id": msg_id, "payload": payload})
 
          
     # ------------------------------------------------------------------
     # Eloquence management
     def start(self) -> None:
-        LOGGER.debug("Starting Eloquence runtime")
+        #LOGGER.debug("Starting Eloquence runtime")
         self._load_dll()
 
     def _load_dll(self) -> None:
@@ -152,7 +152,7 @@ class EloquenceRuntime:
         self._dll.eciSetOutputBuffer.restype = c_int
 
         language_id = LANGS.get(self._config.language_code, LANGS["enu"])
-        LOGGER.debug("Creating Eloquence handle for language %s -> %s", self._config.language_code, language_id)
+        #LOGGER.debug("Creating Eloquence handle for language %s -> %s", self._config.language_code, language_id)
         self._dll.eciNewEx.argtypes = [c_int]
         self._dll.eciNewEx.restype = c_void_p
         handle = self._dll.eciNewEx(language_id)
@@ -177,15 +177,15 @@ class EloquenceRuntime:
         if self._config.voice_variant:
             self.copy_voice(self._config.voice_variant)
         if self._config.enable_phrase_prediction:
-            LOGGER.debug("Enabling phrase prediction")
+            #LOGGER.debug("Enabling phrase prediction")
             self._dll.eciSetParam(handle, 42, 1)
         if self._config.enable_abbrev_dict:
-            LOGGER.debug("Enabling abbreviation dictionary")
+            #LOGGER.debug("Enabling abbreviation dictionary")
             self._dll.eciSetParam(handle, 41, 1)
 
     def _load_dictionaries(self) -> None:
         dictionary_dir = self._config.data_directory
-        LOGGER.debug("Loading dictionaries from %s", dictionary_dir)
+        #LOGGER.debug("Loading dictionaries from %s", dictionary_dir)
         main_candidates = ["enumain.dic", "main.dic"]
         root_candidates = ["enuroot.dic", "root.dic"]
         abbr_candidates = ["enuabbr.dic", "abbr.dic"]
@@ -194,22 +194,22 @@ class EloquenceRuntime:
             for candidate in candidates:
                 path = os.path.join(dictionary_dir, candidate)
                 if os.path.exists(path):
-                    LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
+                    #LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
                     self._dll.eciLoadDict(self._handle, self._dictionary_handle, index, path.encode("mbcs"))
                     break
 
     # ------------------------------------------------------------------
     # Public API invoked from the controller
     def add_text(self, text: bytes) -> None:
-        LOGGER.debug("Adding %d bytes of text", len(text))
+        #LOGGER.debug("Adding %d bytes of text", len(text))
         self._dll.eciAddText(self._handle, text)
 
     def insert_index(self, index: int) -> None:
-        LOGGER.debug("Inserting index %s", index)
+        #LOGGER.debug("Inserting index %s", index)
         self._dll.eciInsertIndex(self._handle, index)
 
     def synthesize(self) -> None:
-        LOGGER.debug("Starting synthesis")
+        #LOGGER.debug("Starting synthesis")
         self._speaking = True
         try:
             self._dll.eciSynthesize(self._handle)
@@ -222,7 +222,7 @@ class EloquenceRuntime:
             self._flush_audio()
 
     def stop(self) -> None:
-        LOGGER.debug("Stopping synthesis")
+        #LOGGER.debug("Stopping synthesis")
         self._dll.eciStop(self._handle)
         self._audio_buffer.seek(0)
         self._audio_buffer.truncate(0)
@@ -230,29 +230,29 @@ class EloquenceRuntime:
         self._send_event("stopped")
 
     def delete(self) -> None:
-        LOGGER.debug("Deleting Eloquence handle")
+        #LOGGER.debug("Deleting Eloquence handle")
         if self._handle:
             self._dll.eciDelete(self._handle)
             self._handle = None
 
     def set_param(self, param_id: int, value: int) -> None:
-        LOGGER.debug("Setting param %s=%s", param_id, value)
+        #LOGGER.debug("Setting param %s=%s", param_id, value)
         self._dll.eciSetParam(self._handle, param_id, value)
         self._params[param_id] = value
         # When changing voice (param 9), update all voice parameters
         if param_id == 9:
-            LOGGER.debug("Voice changed, reading voice parameters")
+            #LOGGER.debug("Voice changed, reading voice parameters")
             for param in (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH):
                 self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
 
     def set_voice_param(self, param_id: int, value: int, temporary: bool = False) -> None:
-        LOGGER.debug("Setting voice param %s=%s temporary=%s", param_id, value, temporary)
+        #LOGGER.debug("Setting voice param %s=%s temporary=%s", param_id, value, temporary)
         self._dll.eciSetVoiceParam(self._handle, 0, param_id, value)
         if not temporary:
             self._voice_params[param_id] = value
 
     def copy_voice(self, variant: int) -> None:
-        LOGGER.debug("Copying voice variant %s", variant)
+        #LOGGER.debug("Copying voice variant %s", variant)
         self._dll.eciCopyVoice(self._handle, variant, 0)
         for param in (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH):
             self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
@@ -265,7 +265,7 @@ class EloquenceRuntime:
     def _on_callback(self, handle, message, length, user_data):
         if not self._speaking:
             return 2
-        LOGGER.debug("Callback message=%s length=%s", message, length)
+        #LOGGER.debug("Callback message=%s length=%s", message, length)
         if message == 0:
             # Audio data callback - send immediately without buffering
             data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))

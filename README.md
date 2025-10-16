@@ -21,6 +21,8 @@ launches a compatible 32-bit Python interpreter with `host_eloquence32.py`.
 
 • Install pyinstaller using py -3.13-32 -m pip install pyinstaller
 
+• run git submodule init
+
 • run build.cmd
 
 • You should then have a fully built NVDA addon
