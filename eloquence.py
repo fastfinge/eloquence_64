@@ -67,7 +67,7 @@ log = logging.getLogger(__name__)
 
 minRate = 40
 maxRate = 150
-pause_re = re.compile(r"([a-zA-Z0-9]|\s)([,.:;?!)])(\2*?)(\s|[\\/]|$|$)")
+pause_re = re.compile(r"([a-zA-Z0-9]|\s)([,.:;?!)\-\(])(\2*?)(\s|[\\/]|$|$)")
 time_re = re.compile(r"(\d):(\d+):(\d+)")
 english_fixes = {
     re.compile(r"(\w+)\.([a-zA-Z]+)"): r"\1 dot \2",
