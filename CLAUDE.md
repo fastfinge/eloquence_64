@@ -1,0 +1,152 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is an NVDA add-on that provides the Eloquence speech synthesizer for 64-bit NVDA. The project uses a unique architecture where a 32-bit helper process hosts the legacy Eloquence DLL and communicates with 64-bit NVDA via IPC.
+
+## Build Commands
+
+### Initial Setup
+```bash
+pip install scons
+py -3.13-32 -m pip install pyinstaller
+python fetch_eci.py          # Downloads proprietary ECI.DLL + .SYN files from upstream
+```
+
+### Building the Add-on
+```bash
+scons
+```
+
+This produces `eloquence-12.nvda-addon` (version number comes from `buildVars.py`).
+
+### Building the 32-bit Host (only needed if `host_eloquence32.py` changes)
+```bash
+build_host.cmd
+```
+
+This compiles the host executable with PyInstaller (requires 32-bit Python 3.13) and copies it into `addon/synthDrivers/`.
+
+### Full Rebuild from Scratch
+```bash
+python fetch_eci.py          # One-time: get proprietary files
+build_host.cmd               # If host changed
+scons
+```
+
+## Architecture
+
+### Inter-Process Architecture
+The add-on uses a client-server architecture to bridge 64-bit and 32-bit code:
+
+- **64-bit Client (NVDA)**: `addon/synthDrivers/eloquence.py`, `_eloquence.py`, `_ipc.py`
+- **32-bit Host Process**: `host_eloquence32.py` (compiled to `eloquence_host32.exe`)
+- **Communication**: IPC via `multiprocessing.connection` with authentication
+
+The 64-bit client spawns the 32-bit helper process, which loads the Eloquence DLL (`eci.dll`) directly. Audio data and synthesis events flow back to NVDA through the IPC channel.
+
+### Key Components
+
+**`addon/synthDrivers/eloquence.py`**: Main NVDA synth driver implementing `SynthDriver`. Handles:
+- Voice management and language switching (via `_resolve_voice_for_language`)
+- Text preprocessing with language-specific fixes (crash prevention patterns)
+- Speech command processing (IndexCommand, LangChangeCommand, BreakCommand, prosody)
+- Dictionary settings GUI panel (`EloquenceSettingsPanel`)
+
+**`addon/synthDrivers/_eloquence.py`**: Client-side IPC wrapper. Provides:
+- `EloquenceHostClient`: Manages subprocess lifecycle, RPC protocol, response handling
+- `AudioWorker`: Threading for audio playback via `nvwave.WavePlayer`
+- Public API functions (`initialize`, `speak`, `index`, `synth`, `stop`, etc.)
+- Audio queue management and sequence tracking for proper cancellation
+
+**`host_eloquence32.py`**: 32-bit host process (stays in repo root). Contains:
+- `EloquenceRuntime`: Wraps the Eloquence DLL with ctypes
+- `HostController`: Handles incoming RPC commands from the client
+- DLL callback handling for audio data and index markers
+- Dictionary loading and parameter management
+
+**`addon/synthDrivers/_ipc.py`**: Simple IPC helpers with length-prefixed pickle protocol (not currently used, but available).
+
+### Critical Implementation Details
+
+**Language Encoding**: Asian languages (Chinese, Japanese, Korean) require special encoding handling:
+- Text must be encoded with language-specific codecs (`gb18030`, `cp932`, `cp949`)
+- The `_current_lang` global tracks the active voice to select proper encoding
+- Text normalization is skipped for multi-byte Asian characters
+
+**Audio Pipeline**:
+- Host sends audio chunks immediately via IPC events
+- `AudioWorker` thread feeds chunks to `nvwave.WavePlayer`
+- Sequence numbers prevent stale audio after `stop()` calls
+- Index callbacks fire when audio completes playback
+
+**Voice Switching**:
+- `LangChangeCommand` triggers voice changes via `_resolve_voice_for_language`
+- Maintains `_defaultVoice` vs `curvoice` to track language overrides
+- Falls back intelligently: exact match → primary language match → default voice
+
+**Crash Prevention**:
+- `english_fixes`, `spanish_fixes`, etc. contain regex patterns
+- These prevent known crash-inducing text patterns from reaching the DLL
+- Text preprocessing in `xspeakText()` applies fixes before synthesis
+
+## Python Environment
+
+This project requires **32-bit Python 3.13** for building the host executable. The Python Manager (`.msix`) is recommended for managing multiple Python versions side-by-side. SCons runs under any Python 3.8+.
+
+## Directory Structure
+
+```
+eloquence_64/
+├── SConstruct                          # SCons build script
+├── buildVars.py                        # Addon metadata (name, version, etc.)
+├── manifest.ini.tpl                    # Manifest template
+├── fetch_eci.py                        # Downloads proprietary ECI.DLL + .SYN files
+├── build_host.cmd                      # Compiles host exe via PyInstaller
+├── host_eloquence32.py                 # 32-bit host source (PyInstaller input)
+├── _multiprocessing.pyd                # 32-bit multiprocessing (used by host at dev time)
+├── addon/                              # Addon source tree (becomes the .nvda-addon zip)
+│   ├── manifest.ini                    # GENERATED by SCons from template
+│   └── synthDrivers/
+│       ├── eloquence.py                # Main synth driver
+│       ├── _eloquence.py               # IPC client wrapper
+│       ├── _eloquence_updater.py       # Auto-updater
+│       ├── _ipc.py                     # IPC helpers
+│       ├── eloquence_host32.exe        # BUILT by build_host.cmd (gitignored)
+│       └── eloquence/
+│           ├── ECI.DLL                 # PROPRIETARY (gitignored, via fetch_eci.py)
+│           ├── ECI.INI                 # Eloquence config
+│           ├── _multiprocessing.pyd    # 64-bit multiprocessing (gitignored)
+│           ├── *.SYN                   # Voice data (western ones gitignored)
+│           ├── chs.syn, jpn.syn, kor.syn           # Asian voice data (in repo)
+│           ├── chsrom.dll, jpnrom.dll, korrom.dll  # Asian ROM DLLs (in repo)
+│           └── multiprocessing/        # Bundled multiprocessing package
+├── site_scons/                         # SCons build tools (NVDATool)
+├── AltIBMTTSDictionaries/              # Git submodule with pronunciation dictionaries
+└── .gitignore
+```
+
+### Proprietary Files
+
+`ECI.DLL` and the 10 western `.SYN` files (DEU, ENG, ENU, ESM, ESP, FIN, FRA, FRC, ITA, PTB) are IBM proprietary and excluded from source control. Run `python fetch_eci.py` to download them from the upstream release artifact. The build will error with a clear message if they're missing.
+
+## Common Development Patterns
+
+When modifying synthesis behavior:
+1. Check if changes belong in the 64-bit driver (`addon/synthDrivers/eloquence.py`) or 32-bit host (`host_eloquence32.py`)
+2. If adding new commands, update both the client (`addon/synthDrivers/_eloquence.py`) and host controller handlers
+3. Run `build_host.cmd` after changing `host_eloquence32.py`
+4. Run `scons` to package changes into the add-on
+
+When debugging IPC issues:
+- Check `eloquence-host.log` in the add-on directory
+- Verify authentication key matches between client and host
+- Ensure sequence numbers are properly incremented to prevent stale audio
+
+When adding language support:
+- Update `LANGS` dictionary in both `addon/synthDrivers/eloquence.py` and `host_eloquence32.py`
+- Add BCP47 language tag mapping in `VOICE_BCP47`
+- Add encoding to `LANG_ENCODINGS` if it's a multi-byte language
+- Place `.syn` and ROM DLL files in `addon/synthDrivers/eloquence/`

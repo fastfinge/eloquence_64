@@ -1,4 +1,28 @@
-eloquence.nvda-addon
+# NVDA addon build output
+*.nvda-addon
+.sconsign.dblite
+addon/manifest.ini
+
+# Proprietary IBM Eloquence files (not distributable via source control)
+addon/synthDrivers/eloquence/ECI.DLL
+addon/synthDrivers/eloquence/DEU.SYN
+addon/synthDrivers/eloquence/ENG.SYN
+addon/synthDrivers/eloquence/ENU.SYN
+addon/synthDrivers/eloquence/ESM.SYN
+addon/synthDrivers/eloquence/ESP.SYN
+addon/synthDrivers/eloquence/FIN.SYN
+addon/synthDrivers/eloquence/FRA.SYN
+addon/synthDrivers/eloquence/FRC.SYN
+addon/synthDrivers/eloquence/ITA.SYN
+addon/synthDrivers/eloquence/PTB.SYN
+
+# Compiled host executable (built from host_eloquence32.py via PyInstaller)
+addon/synthDrivers/eloquence_host32.exe
+
+# 64-bit multiprocessing pyd (copied from _multiprocessing64.pyd at build time)
+addon/synthDrivers/eloquence/_multiprocessing.pyd
+
+# Legacy build artifacts
 eloquence_original.nvda-addon
 
 # Byte-compiled / optimized / DLL files
@@ -29,8 +53,6 @@ wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -54,35 +76,8 @@ coverage.xml
 *.mo
 *.pot
 
-# Django stuff:
+# Logs
 *.log
-local_settings.py
-db.sqlite3
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-.python-version
-
-# celery beat schedule file
-celerybeat-schedule
-
-# SageMath parsed files
-*.sage.py
 
 # Environments
 .env
@@ -93,15 +88,6 @@ ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
+# IDE / editor settings
 .ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
 .mypy_cache/
