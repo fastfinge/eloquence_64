@@ -1,0 +1,65 @@
+name: Build Eloquence Add-on
+
+on:
+  push:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up 64-bit Python 3.13
+        id: py64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: x64
+
+      - name: Set up 32-bit Python 3.13
+        id: py32
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          architecture: x86
+          update-environment: false
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Install PyInstaller (32-bit)
+        run: ${{ steps.py32.outputs.python-path }} -m pip install pyinstaller
+
+      - name: Fetch proprietary files
+        run: python fetch_eci.py
+
+      - name: Build 32-bit host
+        run: |
+          ${{ steps.py32.outputs.python-path }} -m PyInstaller --onefile --noconsole --name eloquence_host32 host_eloquence32.py
+          copy dist\eloquence_host32.exe addon\synthDrivers\eloquence_host32.exe
+        shell: cmd
+
+      - name: Copy 64-bit _multiprocessing.pyd
+        run: |
+          $py64 = Split-Path "${{ steps.py64.outputs.python-path }}"
+          Copy-Item "$py64\DLLs\_multiprocessing.pyd" "addon\synthDrivers\eloquence\_multiprocessing.pyd"
+        shell: pwsh
+
+      - name: Build addon
+        run: scons
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eloquence-addon
+          path: "*.nvda-addon"
+
+      - name: Upload to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.nvda-addon"
