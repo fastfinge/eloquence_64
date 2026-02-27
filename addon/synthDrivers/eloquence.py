@@ -59,6 +59,7 @@ from synthDriverHandler import (
 )
 from synthDriverHandler import SynthDriver, VoiceInfo
 from . import _eloquence
+from . import _text_preprocessing
 from collections import OrderedDict
 import unicodedata
 
@@ -69,39 +70,6 @@ minRate = 40
 maxRate = 150
 pause_re = re.compile(r"([a-zA-Z0-9]|\s)([,.:;?!)])(\2*?)(\s|[\\/]|$|$)")
 time_re = re.compile(r"(\d):(\d+):(\d+)")
-english_fixes = {
-    re.compile(r"(\w+)\.([a-zA-Z]+)"): r"\1 dot \2",
-    re.compile(r"([a-zA-Z0-9_]+)@(\w+)"): r"\1 at \2",
-    # Does not occur in normal use, however if a dictionary entry contains the Mc prefix, and NVDA splits it up, the synth will crash.
-    re.compile(r"\b(Mc)\s+([A-Z][a-z]+)"): r"\1\2",
-    re.compile(r"\b(.*?)c(ae|\xe6)sur(e)?", re.I): r"\1seizur",
-    re.compile(r"\b(|\d+|\W+)h'(r|v)[e]", re.I): r"\1h \2e",
-    re.compile(
-        r"\b(\w+[bdfhjlmnqrvz])(h[he]s)([abcdefghjklmnopqrstvwy]\w+)\b", re.I
-    ): r"\1 \2\3",
-    re.compile(r"\b(\w+[bdfhjlmnqrvz])(h[he]s)(iron+[degins]?)", re.I): r"\1 \2\3",
-    re.compile(r"(\d):(\d\d[snrt][tdh])", re.I): r"\1 \2",
-    re.compile(
-        r"\b([bcdfghjklmnpqrstvwxz]+)'([bcdefghjklmnprstvwxz']+)'([drtv][aeiou]?)", re.I
-    ): r"\1 \2 \3",
-    re.compile(r"\b(you+)'(re)+'([drv]e?)", re.I): r"\1 \2 \3",
-    re.compile(r"(re|un|non|anti)cosp", re.I): r"\1kosp",
-    re.compile(r"(EUR[A-Z]+)(\d+)", re.I): r"\1 \2",
-    re.compile(r"\b(\d+|\W+|[bcdfghjklmnpqrstvwxz])?t+z[s]che", re.I): r"\1tz sche",
-    re.compile(r"\b(juar[aeou]s)([aeiou]{6,})", re.I): r"\1 \2",
-}
-french_fixes = {
-    re.compile(r"([a-zA-Z0-9_]+)@(\w+)"): r"\1 arobase \2",
-}
-spanish_fixes = {
-    # for emails
-    re.compile(r"([a-zA-Z0-9_]+)@(\w+)"): r"\1 arroba \2",
-}
-german_fixes = {
-    # Crash words
-    re.compile(r"dane-ben", re.I): r"dane- ben",
-    re.compile(r"dage-gen", re.I): r"dage- gen",
-}
 VOICE_BCP47 = {
     "enu": "en-US",
     "eng": "en-GB",
@@ -147,38 +115,6 @@ variants = {
     7: "Grandma",
     8: "Grandpa",
 }
-
-
-def strip_accents(s):
-    return "".join(
-        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
-    )
-
-
-def normalizeText(s):
-    """
-    Normalizes  text by removing unicode characters.
-    Tries to preserve accented characters if they fall into MBCS encoding page.
-    Tries to find closest ASCII characters if accented characters cannot be represented in MBCS.
-    """
-    result = []
-    for c in s:
-        try:
-            cc = c.encode("mbcs").decode("mbcs")
-        except UnicodeEncodeError:
-            cc = strip_accents(c)
-            try:
-                cc.encode("mbcs")
-            except UnicodeEncodeError:
-                cc = "?"
-        result.append(cc)
-    return "".join(result)
-
-
-def resub(dct, s):
-    for r in dct.keys():
-        s = r.sub(dct[r], s)
-    return s
 
 
 class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
@@ -969,23 +905,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         _eloquence.process()
 
     def xspeakText(self, text, should_pause=False):
-        if _eloquence.params[9] == 65536 or _eloquence.params[9] == 65537:
-            text = resub(english_fixes, text)
-        if _eloquence.params[9] == 131072 or _eloquence.params[9] == 131073:
-            text = resub(spanish_fixes, text)
-        if _eloquence.params[9] in (196609, 196608):
-            text = resub(french_fixes, text)
-        if _eloquence.params[9] in ("deu", 262144):
-            text = resub(german_fixes, text)
-        # this converts to ansi for anticrash. If this breaks with foreign langs, we can remove it.
-        # text = text.encode('mbcs')
-        # Don't normalize text for Asian languages - they have multi-byte characters
-        if _eloquence.params[9] not in (
-            393216,
-            524288,
-            655360,
-        ):  # Not Chinese, Japanese, or Korean
-            text = normalizeText(text)
+        text = _text_preprocessing.preprocess(text, _eloquence.params[9])
         if not self._backquoteVoiceTags:
             text = text.replace("`", " ")
         text = "`vv%d %s" % (
