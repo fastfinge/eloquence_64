@@ -52,6 +52,7 @@ def create_listener() -> socket.socket:
 def accept_authenticated(listener: socket.socket, authkey: bytes) -> IpcConnection:
 	conn, _ = listener.accept()
 	_authenticate_server(conn, authkey)
+	conn.settimeout(10.0)  # Receiver thread will get socket.timeout after 10s of silence
 	return IpcConnection(conn)
 
 

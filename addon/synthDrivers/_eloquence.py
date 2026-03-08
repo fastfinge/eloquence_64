@@ -5,16 +5,16 @@ from __future__ import annotations
 import itertools
 import logging
 import os
-import sys
+import socket
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 import queue
 import shlex
 import subprocess
 import threading
 from dataclasses import dataclass
-from multiprocessing.connection import Listener
 from typing import Any, Dict, Optional, Sequence, Tuple
+
+from . import _ipc
 
 import config
 import nvwave
@@ -145,7 +145,7 @@ AudioChunk = Tuple[bytes, Optional[int], bool, int]
 class HostProcess:
 	process: subprocess.Popen
 	connection: Any
-	listener: Listener
+	listener: socket.socket
 
 
 class EloquenceHostClient:
@@ -171,9 +171,8 @@ class EloquenceHostClient:
 			return
 		addon_dir = os.path.abspath(os.path.dirname(__file__))
 		authkey = os.urandom(AUTH_KEY_BYTES)
-		listener = Listener(("127.0.0.1", 0), authkey=authkey)
-		address = listener.address
-		port = address[1]
+		listener = _ipc.create_listener()
+		port = listener.getsockname()[1]
 		cmd = list(self._resolve_host_executable(addon_dir))
 		cmd.extend(
 			[
@@ -187,7 +186,7 @@ class EloquenceHostClient:
 		)
 		LOGGER.info("Launching Eloquence host: %s", cmd)
 		proc = subprocess.Popen(cmd, cwd=addon_dir)
-		conn = listener.accept()
+		conn = _ipc.accept_authenticated(listener, authkey)
 		self._host = HostProcess(process=proc, connection=conn, listener=listener)
 		self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
 		self._receiver.start()
@@ -244,6 +243,15 @@ class EloquenceHostClient:
 		while True:
 			try:
 				message = connection.recv()
+			except socket.timeout:
+				if self._host and self._host.process.poll() is not None:
+					LOGGER.error("Host process exited (code %s)", self._host.process.returncode)
+					for msg_id, event in list(self._pending.items()):
+						self._responses[msg_id] = {"error": "hostExited"}
+						event.set()
+					self._pending.clear()
+					break
+				continue  # Host still alive, just busy
 			except (EOFError, ConnectionAbortedError, OSError):
 				LOGGER.info("Host connection closed")
 				for msg_id, event in list(self._pending.items()):
@@ -570,8 +578,8 @@ def getVParam(pr):
 def setVParam(pr, vl, temporary=False):
 	try:
 		response = _client.send_command(
-			"setVoiceParam", paramId=int(pr), value=int(vl), temporary=bool(temporary),
-			wait=False)
+			"setVoiceParam", paramId=int(pr), value=int(vl), temporary=bool(temporary), wait=False
+		)
 		if not temporary:
 			voice_params[pr] = response.get("voiceParams", {}).get(pr, vl)
 	except Exception:

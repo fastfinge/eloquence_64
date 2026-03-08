@@ -2,7 +2,7 @@
 
 This module is executed as a separate helper process under a 32-bit
     Python runtime.  It loads the ETI-Eloquence DLL directly and exposes a
-simple RPC protocol over a `multiprocessing.connection` channel so that
+simple RPC protocol over a length-prefixed pickle IPC channel so that
 64-bit NVDA builds can continue to make use of the original synthesizer.
 
 The helper deliberately avoids importing NVDA modules to keep the
@@ -16,12 +16,15 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import pickle
+import socket
+import struct
 import sys
+import threading
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 from dataclasses import dataclass
 from io import BytesIO
-from multiprocessing.connection import Client
 from typing import Dict, Optional
 
 import ctypes
@@ -32,6 +35,49 @@ from ctypes import (
 	c_void_p,
 	cast,
 )
+
+
+_HEADER_STRUCT = struct.Struct("!I")
+
+
+class IpcConnection:
+	"""Simple length-prefixed message channel built on sockets."""
+
+	def __init__(self, sock: socket.socket):
+		self._sock = sock
+		self._send_lock = threading.Lock()
+
+	def send(self, payload):
+		data = pickle.dumps(payload, protocol=4)
+		header = _HEADER_STRUCT.pack(len(data))
+		with self._send_lock:
+			self._sock.sendall(header)
+			self._sock.sendall(data)
+
+	def recv(self):
+		header = self._recv_exact(_HEADER_STRUCT.size)
+		if not header:
+			raise EOFError
+		(length,) = _HEADER_STRUCT.unpack(header)
+		return pickle.loads(self._recv_exact(length))
+
+	def close(self):
+		try:
+			self._sock.shutdown(socket.SHUT_RDWR)
+		except OSError:
+			pass
+		self._sock.close()
+
+	def _recv_exact(self, length):
+		chunks = []
+		remaining = length
+		while remaining:
+			chunk = self._sock.recv(remaining)
+			if not chunk:
+				raise EOFError
+			chunks.append(chunk)
+			remaining -= len(chunk)
+		return b"".join(chunks)
 
 
 def get_short_path(path):
@@ -112,7 +158,7 @@ class HostConfig:
 class EloquenceRuntime:
 	"""Wraps access to the 32-bit Eloquence DLL."""
 
-	def __init__(self, conn: Client, config: HostConfig):
+	def __init__(self, conn: IpcConnection, config: HostConfig):
 		self._conn = conn
 		self._config = config
 		self._dll = None  # type: ignore[assignment]
@@ -321,7 +367,7 @@ class EloquenceRuntime:
 
 
 class HostController:
-	def __init__(self, conn: Client):
+	def __init__(self, conn: IpcConnection):
 		self._conn = conn
 		self._runtime: Optional[EloquenceRuntime] = None
 		self._should_exit = False
@@ -434,7 +480,10 @@ def main() -> None:
 	host, port_str = args.address.split(":")
 	address = (host, int(port_str))
 	authkey = bytes.fromhex(args.authkey)
-	conn = Client(address, authkey=authkey)
+	sock = socket.create_connection(address)
+	sock.sendall(authkey)
+	sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+	conn = IpcConnection(sock)
 	controller = HostController(conn)
 	controller.serve_forever()
 
