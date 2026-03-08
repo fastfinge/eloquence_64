@@ -45,15 +45,21 @@ After copying the file, Eloquence should load normally on secure and log-on scre
 
 ## Building
 
-• have the Python Install Manager installed and working from: https://www.python.org/ftp/python/pymanager/python-manager-25.0.msix
+### Prerequisites
 
-• Install Python 3.13-32 using py install 3.13-32
+- [Python Install Manager](https://www.python.org/ftp/python/pymanager/python-manager-25.0.msix) (`.msix`)
+- 32-bit Python 3.13: `py install 3.13-32`
+- SCons: `pip install scons`
+- PyInstaller for 32-bit: `py -3.13-32 -m pip install pyinstaller`
 
-• Install pyinstaller using py -3.13-32 -m pip install pyinstaller
+### Build steps
 
-• run git submodule init
+```bash
+git submodule init && git submodule update   # fetch pronunciation dictionaries
+python fetch_eci.py                          # one-time: download proprietary ECI.DLL + voice data
+build_host.cmd                               # compile 32-bit host exe (only needed if host_eloquence32.py changes)
+scons                                        # package everything into the .nvda-addon file
+```
 
-• run build.cmd
-
-• You should then have a fully built NVDA addon
+**Note:** `scons` validates that proprietary files and the host exe exist, but does not fetch or build them — steps 2 and 3 must be done first.
 
