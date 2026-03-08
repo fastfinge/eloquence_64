@@ -22,7 +22,9 @@ class UpdateChangesDialog(wx.Dialog):
 
 		# Summary text
 		# Translators: Text in the Review Update Changes dialog used during add-on update.
-		summary = _("Update to version {latest_version} includes the following changes:").format(latest_version=latest_version)
+		summary = _("Update to version {latest_version} includes the following changes:").format(
+			latest_version=latest_version
+		)
 		main_sizer.Add(wx.StaticText(self, label=summary), 0, wx.ALL, 10)
 
 		# List of changes
@@ -55,7 +57,7 @@ class UpdateChangesDialog(wx.Dialog):
 			# Translators: Text in the Review Update Changes dialog used during add-on update.
 			p_text = _(
 				"Note: {n} local configuration/dictionary files will be preserved.",
-			).format(n=len(changes['preserved']))
+			).format(n=len(changes["preserved"]))
 			main_sizer.Add(wx.StaticText(self, label=p_text), 0, wx.ALL, 10)
 
 		# Buttons
@@ -183,7 +185,9 @@ class EloquenceUpdateManager:
 						if total_size > 0:
 							percent = int(downloaded * 100 / total_size)
 							# Translators: Text in the progress dialog used during add-on update.
-							if not progress_callback(percent, _("Downloading update... {percent}%").format(percent=percent)):
+							if not progress_callback(
+								percent, _("Downloading update... {percent}%").format(percent=percent)
+							):
 								raise Exception("Download cancelled by user")
 			return zip_path
 		except Exception as e:

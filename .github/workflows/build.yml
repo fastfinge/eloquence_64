@@ -56,12 +56,6 @@ jobs:
           copy dist\eloquence_host32.exe addon\synthDrivers\eloquence_host32.exe
         shell: cmd
 
-      - name: Copy 64-bit _multiprocessing.pyd
-        run: |
-          $py64 = Split-Path "${{ steps.py64.outputs.python-path }}"
-          Copy-Item "$py64\DLLs\_multiprocessing.pyd" "addon\synthDrivers\eloquence\_multiprocessing.pyd"
-        shell: pwsh
-
       - name: Build addon
         run: scons && scons pot
 

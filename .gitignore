@@ -20,9 +20,6 @@ addon/synthDrivers/eloquence/PTB.SYN
 # Compiled host executable (built from host_eloquence32.py via PyInstaller)
 addon/synthDrivers/eloquence_host32.exe
 
-# 64-bit multiprocessing pyd (copied from _multiprocessing64.pyd at build time)
-addon/synthDrivers/eloquence/_multiprocessing.pyd
-
 # Legacy build artifacts
 eloquence_original.nvda-addon
 

@@ -137,7 +137,9 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
 			self.dictionaryChoice = sHelper.addLabeledControl(
 				# Translators: Label of a combobox in the Eloquence category of the settings dialog
-				_("Dictionary:"), wx.Choice, choices=list(self.dictionarySources.values())
+				_("Dictionary:"),
+				wx.Choice,
+				choices=list(self.dictionarySources.values()),
 			)
 			self.dictionaryChoice.SetStringSelection(
 				config.conf.get("eloquence", {}).get("dictionary_name", "Alternative IBM TTS Dictionaries")
@@ -159,7 +161,6 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			# NVDA's General settings category.
 			if globalVars.appArgs.secure:
 				self.copyHelperButton.Disable()
-				
 
 			# NEW: Auto-update addon button
 			# Translators: Label of a button in the Eloquence category of the settings dialog
@@ -237,7 +238,9 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			else:
 				wx.MessageBox(
 					# Translators: Text of a message dialog when copying the helper to system config
-					_("An error occurred while attempting to copy the file. (Error Code: {ret})").format(ret=ret),
+					_("An error occurred while attempting to copy the file. (Error Code: {ret})").format(
+						ret=ret
+					),
 					# Translators: Title of a message dialog when copying the helper to system config
 					_("Error"),
 					wx.OK | wx.ICON_ERROR,
@@ -353,7 +356,7 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				return
 
 			# Download update
-			progress = wx.ProgressDialog(		
+			progress = wx.ProgressDialog(
 				# Translators: Text of a progress dialog when updating the add-on
 				_("Downloading Update"),
 				# Translators: Title of a progress dialog when updating the add-on
@@ -434,8 +437,7 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			wx.MessageBox(
 				_(
 					# Translators: Text of a message dialog when updating the add-on
-					"Update failed: {e}\n\n"
-					"Your addon has not been modified."
+					"Update failed: {e}\n\nYour addon has not been modified."
 				).format(e=str(e)),
 				# Translators: Title of a message dialog when updating the add-on
 				_("Update Failed"),
@@ -715,7 +717,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		NumericDriverSetting("bth", _("Breathi&ness")),
 		BooleanDriverSetting(
 			# Translators: A synth setting available in speech settings dialog
-			"backquoteVoiceTags", _("Enable backquote voice &tags"), True
+			"backquoteVoiceTags",
+			_("Enable backquote voice &tags"),
+			True,
 		),
 		# Translators: A synth setting available in speech settings dialog
 		BooleanDriverSetting("ABRDICT", _("Enable &abbreviation dictionary"), False),
