@@ -224,6 +224,19 @@ class EloquenceHostClient:
 		self._audio_worker.start()
 
 	# ------------------------------------------------------------------
+	def close_audio(self) -> None:
+		if self._audio_worker:
+			self._audio_worker.stop()
+			self._audio_worker.join(timeout=1)
+			self._audio_worker = None
+		if self._player:
+			try:
+				self._player.close()
+			except Exception:
+				LOGGER.exception("WavePlayer close failed")
+			self._player = None
+
+	# ------------------------------------------------------------------
 	def _receiver_loop(self) -> None:
 		connection = self._host.connection if self._host else None
 		if connection is None:
@@ -504,6 +517,10 @@ def stop():
 def pause(switch):
 	if _client._player:
 		_client._player.pause(switch)
+
+
+def close_audio():
+	_client.close_audio()
 
 
 def terminate():

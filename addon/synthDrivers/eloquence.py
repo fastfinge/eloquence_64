@@ -795,6 +795,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			raise
 
 	def terminate(self):
+		_eloquence.close_audio()
 		# Safe settings panel removal - won't crash if it was never registered
 		try:
 			if hasattr(gui.settingsDialogs, "NVDASettingsDialog"):
