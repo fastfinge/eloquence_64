@@ -1,6 +1,5 @@
 # NVDA addon build output
 *.nvda-addon
-VERSION
 .sconsign.dblite
 addon/manifest.ini
 

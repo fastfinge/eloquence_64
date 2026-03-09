@@ -1,34 +1,27 @@
 # Build customizations
 # Change this file instead of SConstruct or manifest files, whenever possible.
 
-import os
+import subprocess
 
 
 def _get_version():
-	"""Read version from VERSION file, use it, then increment for next build.
+	"""Derive addon version from git tags.
 
-	Version format: major.minor.patch (e.g. "16.0.0").
-	Patch increments by 2 each build (0, 2, 4, 6, 8).
-	When patch reaches 10, minor increments by 1 and patch resets to 0.
+	- On exact tag: returns tag name (e.g. "v14")
+	- Between tags: returns describe output (e.g. "v13-2-gabcdef")
+	- No git / no tags: returns "dev"
 	"""
-	version_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
-	if not os.path.exists(version_path):
-		with open(version_path, "w") as f:
-			f.write("16.0.0")
-		return "16.0.0"
-	with open(version_path, "r") as f:
-		version_str = f.read().strip()
-	major, minor, patch = (int(x) for x in version_str.split("."))
-	current_version = f"{major}.{minor}.{patch}"
-	next_patch = patch + 2
-	next_minor = minor
-	if next_patch >= 10:
-		next_minor += 1
-		next_patch = 0
-	next_version = f"{major}.{next_minor}.{next_patch}"
-	with open(version_path, "w") as f:
-		f.write(next_version)
-	return current_version
+	try:
+		result = subprocess.run(
+			["git", "describe", "--tags"],
+			capture_output=True,
+			text=True,
+		)
+		if result.returncode == 0:
+			return result.stdout.strip()
+	except FileNotFoundError:
+		pass
+	return "dev"
 
 
 addon_info = {
