@@ -717,9 +717,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		NumericDriverSetting("bth", _("Breathi&ness")),
 		BooleanDriverSetting(
 			# Translators: A synth setting available in speech settings dialog
-			"backquoteVoiceTags",
-			_("Enable backquote voice &tags"),
-			True,
+			"backquoteVoiceTags", _("Enable backquote voice &tags"), True,
 		),
 		# Translators: A synth setting available in speech settings dialog
 		BooleanDriverSetting("ABRDICT", _("Enable &abbreviation dictionary"), False),
@@ -727,7 +725,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		BooleanDriverSetting("phrasePrediction", _("Enable phras&e prediction"), False),
 		# Translators: A synth setting available in speech settings dialog
 		DriverSetting("pauseMode", _("Shorten &pauses"), defaultVal="0"),
+		# Translators: A synth setting available in speech settings dialog
+		DriverSetting('sampleRate', _("&Sample rate"), defaultVal='1'),
+			# Translators: A synth setting available in speech settings dialog
+		NumericDriverSetting("trebleBoost", _("&Treble boost"), defaultVal=50)
 	)
+
 	supportedCommands = {
 		IndexCommand,
 		CharacterModeCommand,
@@ -763,7 +766,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			return False
 
 	def __init__(self):
-		# Safe settings panel registration - won't crash if API changes in different NVDA versions
+		# Safe settings panel registration
 		try:
 			if hasattr(gui.settingsDialogs, "NVDASettingsDialog"):
 				if hasattr(gui.settingsDialogs.NVDASettingsDialog, "categoryClasses"):
@@ -771,8 +774,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 						gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(EloquenceSettingsPanel)
 		except Exception as e:
 			log.warning(f"Could not register Eloquence settings panel: {e}")
-			# Continue initialization - synth will work without settings panel
 
+		# --- Initialize backend ---
 		try:
 			log.info("Eloquence: Starting initialization")
 			_eloquence.initialize(self._onIndexReached)
@@ -781,19 +784,66 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			log.error(f"Eloquence: Failed to initialize _eloquence module: {e}", exc_info=True)
 			raise
 
+		# --- Initialize Treble Boost (MUST be after initialize) ---
+		try:
+			tb = config.conf.get("eloquence", {}).get("trebleBoost", 50)
+			_eloquence.set_treble_boost(tb)
+			log.info(f"Eloquence: Treble boost initialized to {tb}")
+		except Exception:
+			log.exception("Failed to initialize treble boost")
+
+		# --- Voice + parameters ---
 		try:
 			voice_param = _eloquence.params.get(9)
 			if voice_param is None:
 				configured_voice = config.conf.get("speech", {}).get("eci", {}).get("voice", "enu")
 				voice_info = _eloquence.langs.get(configured_voice) or _eloquence.langs.get("enu")
 				voice_param = voice_info[0] if voice_info else 65536
+
 			self._update_voice_state(voice_param, update_default=True)
-			# Initialize _rate first before setting the rate property
+
+			# Rate init
 			self._rate = self._percentToParam(50, minRate, maxRate)
 			self.rate = 50
+
+			# Variant
 			self.variant = "1"
+
+			# Pause mode
 			self._pause_mode = 0
+
+			# --- Sample rate init (IMPORTANT for treble slider visibility) ---
+			self._sample_rate = int(
+				config.conf.get("eloquence", {}).get("sampleRate", 1)
+		)
+			base_settings = (
+				SynthDriver.VoiceSetting(),
+				SynthDriver.VariantSetting(),
+				SynthDriver.RateSetting(),
+				SynthDriver.PitchSetting(),
+				SynthDriver.InflectionSetting(),
+				SynthDriver.VolumeSetting(),
+				NumericDriverSetting("hsz", _("Hea&d size")),
+				NumericDriverSetting("rgh", _("Rou&ghness")),
+				NumericDriverSetting("bth", _("Breathi&ness")),
+				BooleanDriverSetting("backquoteVoiceTags", _("Enable backquote voice &tags"), True),
+				BooleanDriverSetting("ABRDICT", _("Enable &abbreviation dictionary"), False),
+				BooleanDriverSetting("phrasePrediction", _("Enable phras&e prediction"), False),
+				DriverSetting("pauseMode", _("Shorten &pauses"), defaultVal="0"),
+				DriverSetting("sampleRate", _("&Sample rate"), defaultVal="1"),
+			)
+
+			self._base_settings = base_settings
+
+			treble_setting = (
+				NumericDriverSetting("trebleBoost", _("&Treble boost (44 kHz only)"), defaultVal=50),
+			)
+			self._treble_setting = treble_setting
+
+			self.supportedSettings = self._base_settings + self._treble_setting
+
 			log.info("Eloquence: Initialization completed successfully")
+
 		except Exception as e:
 			log.error(f"Eloquence: Failed during voice/parameter setup: {e}", exc_info=True)
 			raise
@@ -1011,6 +1061,56 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 	def _get_pauseMode(self):
 		return str(self._pause_mode)
 
+	def _get_availableSamplerates(self):
+		rates = {}
+		# Standard ECI rates
+		rates["0"] = StringParameterInfo("0", "8 kHz")
+		rates["1"] = StringParameterInfo("1", "11 kHz")
+		# High quality mode using the upsampler DLL
+		rates["2"] = StringParameterInfo("2", "44 kHz")
+		return rates
+
+	def _set_sampleRate(self, val):
+		try:
+			val = int(val)
+		except (ValueError, TypeError):
+			val = 1
+		
+		if hasattr(self, "_sample_rate") and self._sample_rate == val:
+			return
+
+		self._sample_rate = val
+
+		# Update internal state and audio player
+		_eloquence.set_sample_rate(val)
+		client = _eloquence._client
+		if not client:
+			return
+		self.cancel()
+		if client._audio_worker:
+			client._audio_worker.stop()
+			client._audio_worker.join(timeout=1)
+			client._audio_worker = None
+		if client._player:
+			try:
+				client._player.close()
+			except exception:
+				log.exception("WavePlayer close failed")
+			client._player = None
+		client.initialize_audio()
+
+	def _get_sampleRate(self):
+		return str(self._sample_rate)
+
+	def _get_trebleBoost(self):
+		return getattr(self, "_trebleBoost", 50)
+
+	def _set_trebleBoost(self, val):
+		self._trebleBoost = val
+		if self._sample_rate != 2:
+			return
+		_eloquence.set_treble_boost(val)
+
 	_backquoteVoiceTags = False
 	_ABRDICT = False
 	_phrasePrediction = False
@@ -1086,6 +1186,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 	def _get_bth(self):
 		return self.getVParam(_eloquence.bth)
 
+
+ 
 	def _getAvailableVoices(self):
 		o = OrderedDict()
 		for name in os.listdir(_eloquence.eciPath[:-8]):

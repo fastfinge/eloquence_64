@@ -58,8 +58,9 @@ After copying the file, Eloquence should load normally on secure and log-on scre
 git submodule init && git submodule update   # fetch pronunciation dictionaries
 python fetch_eci.py                          # one-time: download proprietary ECI.DLL + voice data
 build_host.cmd                               # compile 32-bit host exe (only needed if host_eloquence32.py changes)
+build_upsampler.cmd                               # compile upsampler library for 44 kHz (only needed if upsampler.c changes)
 scons                                        # package everything into the .nvda-addon file
 ```
 
-**Note:** `scons` validates that proprietary files and the host exe exist, but does not fetch or build them — steps 2 and 3 must be done first.
+**Note:** `scons` validates that proprietary files, the host exe and the upsampler dll exist, but does not fetch or build them — steps 2, 3 and 4 must be done first.
 

@@ -41,7 +41,7 @@ for po in poFiles:
 
 eci_dir = addonDir / "synthDrivers" / "eloquence"
 host_exe = addonDir / "synthDrivers" / "eloquence_host32.exe"
-
+upsampler_dll = addonDir / "synthDrivers" / "upsampler.dll"
 required_proprietary = [eci_dir / "ECI.DLL"] + [
 	eci_dir / f"{name}.SYN" for name in ("DEU", "ENG", "ENU", "ESM", "ESP", "FIN", "FRA", "FRC", "ITA", "PTB")
 ]
@@ -61,6 +61,14 @@ if not host_exe.exists():
 		f"ERROR: {host_exe} not found.\nRun `build_host.cmd` to compile the 32-bit host executable first.",
 		file=sys.stderr,
 	)
+	Exit(1)
+
+if not upsampler_dll.exists():
+	print(
+		f"ERROR: {upsampler_dll} not found.\nRun `build_upsampler.cmd` to compile the upsampler library first.",
+		file=sys.stderr,
+	)
+
 	Exit(1)
 
 # --- Generate manifest ----------------------------------------------------

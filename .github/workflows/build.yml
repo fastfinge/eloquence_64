@@ -40,21 +40,27 @@ jobs:
       - name: Install MSYS2 / gettext
         uses: msys2/setup-msys2@v2
         with:
-          install: gettext
+          install: gettext mingw-w64-x86_64-gcc
           update: true
 
       - name: Add MSYS2 to PATH
         run: echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
         shell: pwsh
 
-      - name: Fetch proprietary files
-        run: python fetch_eci.py
-
       - name: Build 32-bit host
         run: |
           ${{ steps.py32.outputs.python-path }} -m PyInstaller --onefile --noconsole --name eloquence_host32 host_eloquence32.py
           copy dist\eloquence_host32.exe addon\synthDrivers\eloquence_host32.exe
         shell: cmd
+
+      - name: Build upsampler.dll
+        run: |
+          gcc -shared -static-libgcc -o upsampler.dll upsampler.c
+          copy upsampler.dll addon\synthDrivers\upsampler.dll
+        shell: cmd
+
+      - name: Fetch proprietary files
+        run: python fetch_eci.py
 
       - name: Build addon
         run: scons && scons pot
