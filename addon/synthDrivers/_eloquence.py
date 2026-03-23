@@ -205,9 +205,7 @@ class EloquenceHostClient:
 				listener.close()
 			except Exception:
 				pass
-			raise RuntimeError(
-				f"Eloquence host process failed to start: {exc}"
-			) from exc
+			raise RuntimeError(f"Eloquence host process failed to start: {exc}") from exc
 		self._host = HostProcess(process=proc, connection=conn, listener=listener)
 		self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
 		self._receiver.start()
@@ -502,7 +500,16 @@ def speak(text):
 	try:
 		# Use appropriate encoding for Asian languages
 		encoding = LANG_ENCODINGS.get(_current_lang, "mbcs")
-		text_bytes = text.encode(encoding, errors="replace")
+		if encoding == "mbcs":
+			# Use Windows best-fit mapping so characters like Đ→D, ł→l
+			# instead of becoming '?' (see issue #90).
+			from ._text_preprocessing import _wchar_to_mbcs
+
+			text_bytes = _wchar_to_mbcs(text)
+			if text_bytes is None:
+				text_bytes = text.encode("mbcs", errors="replace")
+		else:
+			text_bytes = text.encode(encoding, errors="replace")
 		_client.send_command("addText", text=text_bytes, wait=False)
 	except Exception:
 		LOGGER.exception("Failed to send text to synthesizer")
