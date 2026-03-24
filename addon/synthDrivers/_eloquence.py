@@ -53,13 +53,14 @@ def set_treble_boost(value: int):
 
 # --- Audio rate management constants ---
 # These must be defined before the class starts!
-_SAMPLE_RATE_MAP = {
+_ECI_BASE_RATE_MAP = {
 	0: 8000,
 	1: 11025,
 	2: 11025
 }
 # Use 11kHz as the hardcoded default for the very first initialization
 _current_sample_rate_mode = 1 
+_eci_sample_rate = 5
 
 def get_sample_rate():
 	"""Helper to safely access the global sample rate mode."""
@@ -67,7 +68,7 @@ def get_sample_rate():
 	return _current_sample_rate_mode
 
 def set_sample_rate(mode):
-	global _current_sample_rate_mode
+	global _current_sample_rate_mode, _eci_sample_rate
 
 	try:
 		_current_sample_rate_mode = int(mode)
@@ -80,7 +81,7 @@ def set_sample_rate(mode):
 	eci_val = 0 if _current_sample_rate_mode == 0 else 1
 
 	try:
-		_client.set_param(5, eci_val)
+		_client.set_param(_eci_sample_rate, eci_val)
 	except Exception:
 		LOGGER.exception("Failed to set Eloquence sample rate")
 
@@ -272,7 +273,9 @@ class EloquenceHostClient:
 				listener.close()
 			except Exception:
 				pass
-			raise RuntimeError(f"Eloquence host process failed to start: {exc}") from exc
+			raise RuntimeError(
+				f"Eloquence host process failed to start: {exc}"
+			) from exc
 		self._host = HostProcess(process=proc, connection=conn, listener=listener)
 		self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
 		self._receiver.start()
@@ -299,7 +302,7 @@ class EloquenceHostClient:
 			return
 
 		mode = get_sample_rate()
-		base_rate = _SAMPLE_RATE_MAP.get(mode, 11025)
+		base_rate = _ECI_BASE_RATE_MAP.get(mode, 11025)
 		
 		if mode == 2 and upsampler_dll:
 			target_rate = base_rate * 4
@@ -598,16 +601,7 @@ def speak(text):
 	try:
 		# Use appropriate encoding for Asian languages
 		encoding = LANG_ENCODINGS.get(_current_lang, "mbcs")
-		if encoding == "mbcs":
-			# Use Windows best-fit mapping so characters like Đ→D, ł→l
-			# instead of becoming '?' (see issue #90).
-			from ._text_preprocessing import _wchar_to_mbcs
-
-			text_bytes = _wchar_to_mbcs(text)
-			if text_bytes is None:
-				text_bytes = text.encode("mbcs", errors="replace")
-		else:
-			text_bytes = text.encode(encoding, errors="replace")
+		text_bytes = text.encode(encoding, errors="replace")
 		_client.send_command("addText", text=text_bytes, wait=False)
 	except Exception:
 		LOGGER.exception("Failed to send text to synthesizer")
