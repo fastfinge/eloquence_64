@@ -1,5 +1,5 @@
 # Copyright (C) 2009-2019 eloquence fans
-# synthDrivers/eci.py
+f# synthDrivers/eci.py
 # todo: possibly add to this
 import gui
 import wx
