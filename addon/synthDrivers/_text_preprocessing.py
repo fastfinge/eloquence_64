@@ -6,6 +6,7 @@ point -- ``preprocess()`` -- that applies the appropriate fixes for a given
 Eloquence voice.
 """
 
+import ctypes
 import re
 import unicodedata
 
@@ -122,23 +123,60 @@ def _strip_accents(s):
 	return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 
-def _normalize_text(s):
-	"""Normalize text by removing characters outside the MBCS encoding page.
+def _wchar_to_mbcs(text, code_page=0):
+	"""Encode Unicode to MBCS bytes using Windows best-fit character mapping.
 
-	Tries to preserve accented characters that fall within the active MBCS
-	code page and replaces others with their closest ASCII equivalent or
-	``?`` as a last resort.
+	Calls ``WideCharToMultiByte`` with *dwFlags=0*, which enables Windows
+	best-fit mapping for characters outside the target code page (e.g.
+	Đ→D, ł→l) instead of replacing them with ``?``.
+
+	Args:
+		text: Unicode string to convert.
+		code_page: Windows code page (0 = CP_ACP, the system default).
+
+	Returns:
+		Encoded bytes, or *None* if the conversion fails entirely.
 	"""
+	if not text:
+		return b""
+	_WideCharToMultiByte = ctypes.windll.kernel32.WideCharToMultiByte
+	size = _WideCharToMultiByte(code_page, 0, text, len(text), None, 0, None, None)
+	if size == 0:
+		return None
+	buf = ctypes.create_string_buffer(size)
+	if _WideCharToMultiByte(code_page, 0, text, len(text), buf, size, None, None) == 0:
+		return None
+	return buf.raw
+
+
+def _normalize_text(s):
+	"""Normalize text to fit the active MBCS code page.
+
+	Uses Windows best-fit character mapping via ``WideCharToMultiByte`` so
+	that characters like Đ and ł are mapped to their closest equivalents
+	(D, l) instead of being replaced with ``?``.
+	"""
+	encoded = _wchar_to_mbcs(s)
+	if encoded is not None:
+		try:
+			return encoded.decode("mbcs")
+		except UnicodeDecodeError:
+			pass
+	# Fallback: per-character approach (should rarely trigger)
 	result = []
 	for c in s:
-		try:
-			cc = c.encode("mbcs").decode("mbcs")
-		except UnicodeEncodeError:
-			cc = _strip_accents(c)
+		char_bytes = _wchar_to_mbcs(c)
+		if char_bytes is not None:
 			try:
-				cc.encode("mbcs")
-			except UnicodeEncodeError:
-				cc = "?"
+				result.append(char_bytes.decode("mbcs"))
+				continue
+			except UnicodeDecodeError:
+				pass
+		cc = _strip_accents(c)
+		try:
+			cc.encode("mbcs")
+		except UnicodeEncodeError:
+			cc = "?"
 		result.append(cc)
 	return "".join(result)
 

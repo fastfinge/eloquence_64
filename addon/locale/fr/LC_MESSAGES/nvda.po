@@ -313,6 +313,31 @@ msgstr ""
 msgid "An error occurred while updating the dictionary: {e}"
 msgstr "Une erreur s'est produite lors de la mise à jour du dictionnaire : {e}"
 
+#. Translators: Text of a one-time migration notice shown after updating from the old IPC system
+#: addon\synthDrivers\eloquence.py:816
+msgid ""
+"Eloquence has been updated with a new communication system.\n"
+"\n"
+"If you use Eloquence on secure screens (logon screen, UAC prompts), please "
+"go to NVDA Settings > Eloquence and click 'Copy Helper to System Config' to "
+"update the secure screen copy.\n"
+"\n"
+"This message will only appear once."
+msgstr ""
+"Eloquence a été mis à jour avec un nouveau système de communication.\n"
+"\n"
+"Si vous utilisez Eloquence sur les écrans sécurisés (écran de connexion, "
+"invites UAC), veuillez accéder à Paramètres NVDA > Eloquence et cliquer sur "
+"« Copier le helper dans la configuration système » pour mettre à jour la "
+"copie pour les écrans sécurisés.\n"
+"\n"
+"Ce message n'apparaîtra qu'une seule fois."
+
+#. Translators: Title of a one-time migration notice dialog
+#: addon\synthDrivers\eloquence.py:822
+msgid "Eloquence Update Notice"
+msgstr "Avis de mise à jour d'Eloquence"
+
 #. Translators: A synth setting available in speech settings dialog
 #: addon\synthDrivers\eloquence.py:711
 msgid "Hea&d size"

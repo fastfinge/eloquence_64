@@ -58,8 +58,8 @@ msgstr ""
 "Carpeta de Eloquence no encontrada en systemConfig.\n"
 "\n"
 "Por favor, vaya a Configuración de NVDA > General y haga clic en 'Usar la "
-"configuración guardada en el inicio de sesión' primero para inicializar las "
-"carpetas."
+"configuración guardada en la pantalla de inicio de sesión' primero para "
+"inicializar las carpetas."
 
 #. Translators: Title of a message dialog when copying the helper to system config
 #: addon\synthDrivers\eloquence.py:191
@@ -97,7 +97,7 @@ msgstr ""
 "¡eloquence_host32.exe se copió correctamente a systemConfig!\n"
 "\n"
 "Eloquence debería cargarse normalmente en la pantalla de inicio de sesión, "
-"el arranque y otras pantallas seguras."
+"el arranque y otras pantallas del sistema."
 
 #. Translators: Title of a message dialog when copying the helper to system config
 #. Translators: Title of a message dialog when updating a dictionary
@@ -310,6 +310,31 @@ msgstr ""
 #, python-brace-format
 msgid "An error occurred while updating the dictionary: {e}"
 msgstr "Ocurrió un error al actualizar el diccionario: {e}"
+
+#. Translators: Text of a one-time migration notice shown after updating from the old IPC system
+#: addon\synthDrivers\eloquence.py:816
+msgid ""
+"Eloquence has been updated with a new communication system.\n"
+"\n"
+"If you use Eloquence on secure screens (logon screen, UAC prompts), please "
+"go to NVDA Settings > Eloquence and click 'Copy Helper to System Config' to "
+"update the secure screen copy.\n"
+"\n"
+"This message will only appear once."
+msgstr ""
+"Eloquence se ha actualizado con un nuevo sistema de comunicación.\n"
+"\n"
+"Si utiliza Eloquence en pantallas como la de inicio de sesión o el Control "
+"de cuentas de usuario, vaya a Configuración de NVDA > Eloquence y haga clic "
+"en 'Copiar Helper a la configuración del sistema' para actualizar la copia "
+"para estas pantallas.\n"
+"\n"
+"Este mensaje solo aparecerá una vez."
+
+#. Translators: Title of a one-time migration notice dialog
+#: addon\synthDrivers\eloquence.py:822
+msgid "Eloquence Update Notice"
+msgstr "Aviso de actualización de Eloquence"
 
 #. Translators: A synth setting available in speech settings dialog
 #: addon\synthDrivers\eloquence.py:711

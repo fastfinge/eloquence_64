@@ -58,6 +58,7 @@ import os
 import config
 import re
 import logging
+import core
 import globalVars
 from synthDriverHandler import (
 	SynthDriver,
@@ -847,6 +848,35 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		except Exception as e:
 			log.error(f"Eloquence: Failed during voice/parameter setup: {e}", exc_info=True)
 			raise
+
+		# One-time migration notice for users updating from multiprocessing-based IPC
+		try:
+			eci_conf = config.conf.get("speech", {}).get("ibmeci")
+			eloquence_conf = config.conf.get("eloquence", {})
+			if eci_conf is not None and not eloquence_conf.get("ipc_migration_notice_shown", False):
+
+				def _show_migration_notice():
+					if "eloquence" not in config.conf:
+						config.conf["eloquence"] = {}
+					config.conf["eloquence"]["ipc_migration_notice_shown"] = True
+					config.conf.save()
+					wx.CallAfter(
+						gui.messageBox,
+						_(
+							"Eloquence has been updated with a new communication system.\n\n"
+							"If you use Eloquence on secure screens (logon screen, UAC prompts), "
+							"please go to NVDA Settings > Eloquence and click "
+							"'Copy Helper to System Config' to update the secure screen copy.\n\n"
+							"This message will only appear once."
+						),
+						_("Eloquence Update Notice"),
+						wx.OK | wx.ICON_INFORMATION,
+					)
+
+				self._migration_func = _show_migration_notice
+				core.postNvdaStartup.register(self._migration_func)
+		except Exception:
+			pass  # Never let a notice prevent the synth from working
 
 	def terminate(self):
 		_eloquence.close_audio()
