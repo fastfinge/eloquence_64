@@ -1,5 +1,5 @@
 # Copyright (C) 2009-2019 eloquence fans
-f# synthDrivers/eci.py
+# synthDrivers/eci.py
 # todo: possibly add to this
 import gui
 import wx
@@ -58,6 +58,7 @@ import os
 import config
 import re
 import logging
+import core
 import globalVars
 from synthDriverHandler import (
 	SynthDriver,
@@ -702,7 +703,32 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
 class SynthDriver(synthDriverHandler.SynthDriver):
 	settingsPanel = EloquenceSettingsPanel
-
+	supportedSettings = (
+		SynthDriver.VoiceSetting(),
+		SynthDriver.VariantSetting(),
+		SynthDriver.RateSetting(),
+		SynthDriver.PitchSetting(),
+		SynthDriver.InflectionSetting(),
+		SynthDriver.VolumeSetting(),
+		# Translators: A synth setting available in speech settings dialog
+		NumericDriverSetting("hsz", _("Hea&d size")),
+		# Translators: A synth setting available in speech settings dialog
+		NumericDriverSetting("rgh", _("Rou&ghness")),
+		# Translators: A synth setting available in speech settings dialog
+		NumericDriverSetting("bth", _("Breathi&ness")),
+		BooleanDriverSetting(
+			# Translators: A synth setting available in speech settings dialog
+			"backquoteVoiceTags",
+			_("Enable backquote voice &tags"),
+			True,
+		),
+		# Translators: A synth setting available in speech settings dialog
+		BooleanDriverSetting("ABRDICT", _("Enable &abbreviation dictionary"), False),
+		# Translators: A synth setting available in speech settings dialog
+		BooleanDriverSetting("phrasePrediction", _("Enable phras&e prediction"), False),
+		# Translators: A synth setting available in speech settings dialog
+		DriverSetting("pauseMode", _("Shorten &pauses"), defaultVal="0"),
+	)
 	supportedCommands = {
 		IndexCommand,
 		CharacterModeCommand,
@@ -713,9 +739,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		VolumeCommand,
 		PhonemeCommand,
 	}
-
 	supportedNotifications = {synthIndexReached, synthDoneSpeaking}
-
 	PROSODY_ATTRS = {
 		PitchCommand: _eloquence.pitch,
 		VolumeCommand: _eloquence.vlm,
@@ -725,6 +749,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 	description = "ETI-Eloquence"
 	name = "eloquence"
 
+	# Initialize _pause_mode at class level to prevent issues with setting restoration
 	_pause_mode = 0
 
 	@classmethod
@@ -738,76 +763,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			log.error(f"Eloquence: check() failed with error: {e}", exc_info=True)
 			return False
 
-	def _get_supportedSettings(self):
-		settings = [
-			SynthDriver.VoiceSetting(),
-			SynthDriver.VariantSetting(),
-			SynthDriver.RateSetting(),
-			SynthDriver.PitchSetting(),
-			SynthDriver.InflectionSetting(),
-			SynthDriver.VolumeSetting(),
-
-			# Translators: A synth setting available in speech settings dialog
-			NumericDriverSetting("hsz", _("Hea&d size")),
-
-			# Translators: A synth setting available in speech settings dialog
-			NumericDriverSetting("rgh", _("Rou&ghness")),
-
-			# Translators: A synth setting available in speech settings dialog
-			NumericDriverSetting("bth", _("Breathi&ness")),
-
-			# Translators: A synth setting available in speech settings dialog
-			BooleanDriverSetting(
-				"backquoteVoiceTags",
-				_("Enable backquote voice &tags"),
-				True,
-			),
-
-			# Translators: A synth setting available in speech settings dialog
-			BooleanDriverSetting(
-				"ABRDICT",
-				_("Enable &abbreviation dictionary"),
-				False,
-			),
-
-			# Translators: A synth setting available in speech settings dialog
-			BooleanDriverSetting(
-				"phrasePrediction",
-				_("Enable phras&e prediction"),
-				False,
-			),
-
-			# Translators: A synth setting available in speech settings dialog
-			DriverSetting(
-				"pauseMode",
-				_("Shorten &pauses"),
-				defaultVal="0",
-			),
-
-			# Translators: A synth setting available in speech settings dialog
-			DriverSetting(
-				"sampleRate",
-				_("&Sample rate"),
-				defaultVal="1",
-			),
-		]
-
-		# Only show treble boost at 44 kHz (sample rate == 2)
-		if getattr(self, "_sample_rate", 1) == 2:
-			tb_val = int(config.conf.get("eloquence", {}).get("trebleBoost", 50))
-			settings.append(
-				# Translators: A synth setting available in speech settings dialog
-				NumericDriverSetting(
-					"trebleBoost",
-					_("&Treble boost (44 kHz only)"),
-					defaultVal=tb_val,
-				)
-			)
-
-		return settings
-
 	def __init__(self):
-		# Safe settings panel registration
+		# Safe settings panel registration - won't crash if API changes in different NVDA versions
 		try:
 			if hasattr(gui.settingsDialogs, "NVDASettingsDialog"):
 				if hasattr(gui.settingsDialogs.NVDASettingsDialog, "categoryClasses"):
@@ -815,8 +772,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 						gui.settingsDialogs.NVDASettingsDialog.categoryClasses.append(EloquenceSettingsPanel)
 		except Exception as e:
 			log.warning(f"Could not register Eloquence settings panel: {e}")
+			# Continue initialization - synth will work without settings panel
 
-		# --- Initialize backend ---
 		try:
 			log.info("Eloquence: Starting initialization")
 			_eloquence.initialize(self._onIndexReached)
@@ -825,44 +782,55 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			log.error(f"Eloquence: Failed to initialize _eloquence module: {e}", exc_info=True)
 			raise
 
-		# --- Initialize Treble Boost ---
-		try:
-			tb = config.conf.get("eloquence", {}).get("trebleBoost", 50)
-			_eloquence.set_treble_boost(tb)
-			log.info(f"Eloquence: Treble boost initialized to {tb}")
-		except Exception:
-			log.exception("Failed to initialize treble boost")
-
-		# --- Voice + parameters ---
 		try:
 			voice_param = _eloquence.params.get(9)
 			if voice_param is None:
 				configured_voice = config.conf.get("speech", {}).get("eci", {}).get("voice", "enu")
 				voice_info = _eloquence.langs.get(configured_voice) or _eloquence.langs.get("enu")
 				voice_param = voice_info[0] if voice_info else 65536
-
 			self._update_voice_state(voice_param, update_default=True)
-
+			# Initialize _rate first before setting the rate property
 			self._rate = self._percentToParam(50, minRate, maxRate)
 			self.rate = 50
-
 			self.variant = "1"
-
 			self._pause_mode = 0
-
-			# IMPORTANT: needed for dynamic settings visibility
-			self._sample_rate = int(
-				config.conf.get("eloquence", {}).get("sampleRate", 1)
-			)
-
 			log.info("Eloquence: Initialization completed successfully")
-
 		except Exception as e:
 			log.error(f"Eloquence: Failed during voice/parameter setup: {e}", exc_info=True)
 			raise
 
+		# One-time migration notice for users updating from multiprocessing-based IPC
+		try:
+			eci_conf = config.conf.get("speech", {}).get("ibmeci")
+			eloquence_conf = config.conf.get("eloquence", {})
+			if eci_conf is not None and not eloquence_conf.get("ipc_migration_notice_shown", False):
+
+				def _show_migration_notice():
+					if "eloquence" not in config.conf:
+						config.conf["eloquence"] = {}
+					config.conf["eloquence"]["ipc_migration_notice_shown"] = True
+					config.conf.save()
+					wx.CallAfter(
+						gui.messageBox,
+						_(
+							"Eloquence has been updated with a new communication system.\n\n"
+							"If you use Eloquence on secure screens (logon screen, UAC prompts), "
+							"please go to NVDA Settings > Eloquence and click "
+							"'Copy Helper to System Config' to update the secure screen copy.\n\n"
+							"This message will only appear once."
+						),
+						_("Eloquence Update Notice"),
+						wx.OK | wx.ICON_INFORMATION,
+					)
+
+				self._migration_func = _show_migration_notice
+				core.postNvdaStartup.register(self._migration_func)
+		except Exception:
+			pass  # Never let a notice prevent the synth from working
+
 	def terminate(self):
 		_eloquence.close_audio()
+		# Safe settings panel removal - won't crash if it was never registered
 		try:
 			if hasattr(gui.settingsDialogs, "NVDASettingsDialog"):
 				if hasattr(gui.settingsDialogs.NVDASettingsDialog, "categoryClasses"):
@@ -1072,64 +1040,6 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	def _get_pauseMode(self):
 		return str(self._pause_mode)
-
-	def _get_availableSamplerates(self):
-		rates = {}
-		# Standard ECI rates
-		rates["0"] = StringParameterInfo("0", "8 kHz")
-		rates["1"] = StringParameterInfo("1", "11 kHz")
-		# High quality mode using the upsampler DLL
-		rates["2"] = StringParameterInfo("2", "44 kHz")
-		return rates
-
-	def _set_sampleRate(self, val):
-		try:
-			val = int(val)
-		except (ValueError, TypeError):
-			val = 1
-
-		if hasattr(self, "_sample_rate") and self._sample_rate == val:
-			return
-
-		self._sample_rate = int(val)
-
-		# Update internal state and audio player
-		_eloquence.set_sample_rate(val)
-		client = _eloquence._client
-		if not client:
-			return
-		self.cancel()
-		if client._audio_worker:
-			client._audio_worker.stop()
-			client._audio_worker.join(timeout=1)
-			client._audio_worker = None
-		if client._player:
-			try:
-				client._player.close()
-			except Exception:
-				log.exception("WavePlayer close failed")
-			client._player = None
-		client.initialize_audio()
-
-		# ---- Apply treble boost when switching to 44 kHz ----
-		try:
-			if val == 2:
-				strength = getattr(self, "_trebleBoost", 50)
-				_eloquence.set_treble_boost(strength)
-		except Exception:
-			log.exception("Failed to apply treble boost after sample rate change")
-
-	def _get_sampleRate(self):
-		return str(self._sample_rate)
-
-	def _get_trebleBoost(self):
-		return int(getattr(self, "_trebleBoost", 50))
-
-	def _set_trebleBoost(self, val):
-		self._trebleBoost = val
-		if self._sample_rate != 2:
-			return
-		_eloquence.set_treble_boost(int(val))
 
 	_backquoteVoiceTags = False
 	_ABRDICT = False

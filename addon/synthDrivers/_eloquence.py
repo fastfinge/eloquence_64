@@ -13,7 +13,6 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
-from ctypes import CDLL, POINTER, c_int16, c_int
 
 from . import _ipc
 
@@ -29,63 +28,11 @@ AUTH_KEY_BYTES = 16
 
 
 # Audio handling -----------------------------------------------------------------
-# --- Upsampler DLL setup (64-bit) ---
-upsampler_dll_path = os.path.join(os.path.dirname(__file__), "upsampler.dll")
-try:
-	upsampler_dll = CDLL(upsampler_dll_path)
-	upsampler_dll.process.argtypes = (POINTER(c_int16), c_int, POINTER(c_int16))
-	upsampler_dll.process.restype = None
-	upsampler_dll.reset.argtypes = ()
-	upsampler_dll.reset.restype = None
-	# Register the strength control function
-	upsampler_dll.set_strength.argtypes = (c_int,)
-	upsampler_dll.set_strength.restype = None
-except Exception:
-	LOGGER.exception("Failed to load upsampler.dll")
-	upsampler_dll = None
-
-def set_treble_boost(value: int):
-	"""
-	Passes the treble boost value (0-100) to the C upsampler.
-	"""
-	if upsampler_dll:
-		upsampler_dll.set_strength(value)
-
-# --- Audio rate management constants ---
-# These must be defined before the class starts!
-_ECI_BASE_RATE_MAP = {
-	0: 8000,
-	1: 11025,
-	2: 11025
-}
-# Use 11kHz as the hardcoded default for the very first initialization
-_current_sample_rate_mode = 1 
-_eci_sample_rate = 5
-
-def get_sample_rate():
-	"""Helper to safely access the global sample rate mode."""
-	global _current_sample_rate_mode
-	return _current_sample_rate_mode
-
-def set_sample_rate(mode):
-	global _current_sample_rate_mode, _eci_sample_rate
-
-	try:
-		_current_sample_rate_mode = int(mode)
-	except (ValueError, TypeError):
-		_current_sample_rate_mode = 1
-
-	if not _client:
-		return
-
-	eci_val = 0 if _current_sample_rate_mode == 0 else 1
-
-	try:
-		_client.set_param(_eci_sample_rate, eci_val)
-	except Exception:
-		LOGGER.exception("Failed to set Eloquence sample rate")
-
 class AudioWorker(threading.Thread):
+	_CHANNELS = 1
+	_BITS_PER_SAMPLE = 16
+	_SAMPLE_RATE = 11025
+
 	def __init__(
 		self,
 		player: nvwave.WavePlayer,
@@ -100,71 +47,56 @@ class AudioWorker(threading.Thread):
 		self._stopping = False
 		self._player_lock = threading.RLock()
 
-	def _reset_filter(self):
-		"""Reset the DLL upsampler state to avoid clicks."""
-		if upsampler_dll:
-			upsampler_dll.reset()
-
 	def run(self) -> None:
-		q_get = self._queue.get
-		task_done = self._queue.task_done
-
 		while self._running:
 			try:
-				chunk = q_get(timeout=0.1)
+				chunk = self._queue.get(timeout=0.1)
 			except queue.Empty:
 				continue
-
 			if chunk is None:
 				break
-
 			data, index, is_final, seq = chunk
-
 			if seq < self._client._sequence:
-				self._reset_filter()
-				task_done()
+				self._queue.task_done()
 				continue
 
+			# --- New logic (EARCONS patch) ---
 			if not data:
 				if not self._stopping:
 					if index is not None:
 						self._invoke_index_callback(index)
 					if is_final:
-						self._reset_filter()
 						self._schedule_idle()
+				self._queue.task_done()
+				continue
+			# ------------------------------------
 
-				task_done()
+			on_done = None
+			if index is not None:
+
+				def _callback(i=index):
+					self._invoke_index_callback(i)
+
+				on_done = _callback
+
+			wrapped_on_done = self._make_on_done(on_done, is_final)
+
+			# Early exit if stopping - avoids unnecessary lock acquisition
+			if self._stopping:
+				self._queue.task_done()
 				continue
 
-			on_done = self._make_on_done(
-				(lambda: self._invoke_index_callback(index)) if index is not None else None,
-				is_final,
-			)
-
+			# Feed directly - blocks if buffer is full
 			try:
 				with self._player_lock:
-					if not self._stopping and self._player:
-						# Use the global function to get the current mode safely
-						current_mode = get_sample_rate()
-
-						if current_mode == 2 and upsampler_dll:
-							# ── HQ Path: Upsampling 11k -> 44k ────────────────
-							input_samples = memoryview(data).cast("h")
-							in_len = len(input_samples)
-							in_ptr = (c_int16 * in_len).from_buffer_copy(data)
-							
-							out_len = in_len * 4
-							out_buffer = (c_int16 * out_len)()
-
-							upsampler_dll.process(in_ptr, in_len, out_buffer)
-							self._player.feed(bytes(out_buffer), onDone=on_done)
-						else:
-							# ── Standard Path: 8k or 11k direct ───────────────
-							self._player.feed(data, onDone=on_done)
+					if not self._stopping:
+						if self._player:
+							self._player.feed(data, onDone=wrapped_on_done)
+			except FileNotFoundError:
+				LOGGER.warning("Sound device not found during feed")
 			except Exception:
-				LOGGER.exception("AudioWorker: Failed to feed player")
-
-			task_done()
+				LOGGER.exception("WavePlayer feed failed")
+			self._queue.task_done()
 
 	def stop(self) -> None:
 		self._stopping = True
@@ -273,9 +205,7 @@ class EloquenceHostClient:
 				listener.close()
 			except Exception:
 				pass
-			raise RuntimeError(
-				f"Eloquence host process failed to start: {exc}"
-			) from exc
+			raise RuntimeError(f"Eloquence host process failed to start: {exc}") from exc
 		self._host = HostProcess(process=proc, connection=conn, listener=listener)
 		self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
 		self._receiver.start()
@@ -300,36 +230,16 @@ class EloquenceHostClient:
 	def initialize_audio(self) -> None:
 		if self._player:
 			return
-
-		mode = get_sample_rate()
-		base_rate = _ECI_BASE_RATE_MAP.get(mode, 11025)
-		
-		if mode == 2 and upsampler_dll:
-			target_rate = base_rate * 4
+		if version_year >= 2025:
+			device = config.conf["audio"]["outputDevice"]
+			player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device)
 		else:
-			target_rate = base_rate
-
-		# Ensure target_rate is integer
-		target_rate = int(target_rate)
-
-		try:
-			if version_year >= 2025:
-				device = config.conf["audio"]["outputDevice"]
-				player = nvwave.WavePlayer(1, target_rate, 16, outputDevice=device)
-			else:
-				device = config.conf["speech"]["outputDevice"]
-				nvwave.WavePlayer.MIN_BUFFER_MS = 1500
-				player = nvwave.WavePlayer(1, target_rate, 16, outputDevice=device, buffered=True)
-			
-			self._player = player
-			# Important: Use the new player for the worker
-			self._audio_worker = AudioWorker(player, self._audio_queue, self)
-			self._audio_worker.start()
-			LOGGER.info(f"Eloquence: Audio initialized at {target_rate}Hz (Mode {mode})")
-		except Exception:
-			LOGGER.exception("Eloquence: Failed to initialize WavePlayer")
-			self._player = None
-
+			device = config.conf["speech"]["outputDevice"]
+			nvwave.WavePlayer.MIN_BUFFER_MS = 1500
+			player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
+		self._player = player
+		self._audio_worker = AudioWorker(player, self._audio_queue, self)
+		self._audio_worker.start()
 
 	# ------------------------------------------------------------------
 	def close_audio(self) -> None:
@@ -462,17 +372,6 @@ class EloquenceHostClient:
 				raise RuntimeError(response["error"])
 			return response.get("payload", {})
 
-	def set_param(self, param: int, value: int) -> None:
-		"""Sends an ECI parameter change to the 32-bit host process."""
-		if not self._host:
-			return
-
-		try:
-			# Use the camelCase command expected by the 32-bit host and the expected payload keys
-			self.send_command("setParam", wait=False, paramId=param, value=value)
-		except Exception:
-			LOGGER.exception("Failed to send ECI parameter to host")
-
 	# ------------------------------------------------------------------
 	def shutdown(self) -> None:
 		if not self._host:
@@ -601,7 +500,16 @@ def speak(text):
 	try:
 		# Use appropriate encoding for Asian languages
 		encoding = LANG_ENCODINGS.get(_current_lang, "mbcs")
-		text_bytes = text.encode(encoding, errors="replace")
+		if encoding == "mbcs":
+			# Use Windows best-fit mapping so characters like Đ→D, ł→l
+			# instead of becoming '?' (see issue #90).
+			from ._text_preprocessing import _wchar_to_mbcs
+
+			text_bytes = _wchar_to_mbcs(text)
+			if text_bytes is None:
+				text_bytes = text.encode("mbcs", errors="replace")
+		else:
+			text_bytes = text.encode(encoding, errors="replace")
 		_client.send_command("addText", text=text_bytes, wait=False)
 	except Exception:
 		LOGGER.exception("Failed to send text to synthesizer")
