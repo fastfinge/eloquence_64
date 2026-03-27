@@ -868,6 +868,18 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		for pr in (_eloquence.rate, _eloquence.pitch, _eloquence.vlm):
 			outlist.append((_eloquence.cmdProsody, (pr, 1, 0)))
 
+		# Reset voice to default at the start of each utterance so that
+		# language overrides from the previous sequence don't leak into
+		# untagged speech (issue #97).
+		if getattr(self, "_languageOverrideActive", False):
+			default_voice = getattr(self, "_defaultVoice", None)
+			if default_voice is not None:
+				try:
+					outlist.append((_eloquence.set_voice, (int(default_voice),)))
+					self._update_voice_state(int(default_voice), update_default=False)
+				except (TypeError, ValueError):
+					pass
+
 		# IBMTTS Logic: Combine strings before processing regex
 		speechSequence = self.combine_adjacent_strings(speechSequence)
 
