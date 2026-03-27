@@ -14,7 +14,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
-from . import _ipc
+from . import _eloquence_ipc as _ipc
 
 import config
 import nvwave
