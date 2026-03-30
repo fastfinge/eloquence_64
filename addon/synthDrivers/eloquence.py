@@ -789,6 +789,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 				voice_info = _eloquence.langs.get(configured_voice) or _eloquence.langs.get("enu")
 				voice_param = voice_info[0] if voice_info else 65536
 			self._update_voice_state(voice_param, update_default=True)
+			self._cancelledOverrideVoice = None
 			# Initialize _rate first before setting the rate property
 			self._rate = self._percentToParam(50, minRate, maxRate)
 			self.rate = 50
@@ -862,16 +863,29 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		outlist = []
 		pending_indexes = []
 		queued_speech = False
+		cleared_override_voice = None
 
 		# Reset prosody to baseline at the start of each utterance to prevent
 		# state leaks from previous speech sequences (issue #59).
 		for pr in (_eloquence.rate, _eloquence.pitch, _eloquence.vlm):
 			outlist.append((_eloquence.cmdProsody, (pr, 1, 0)))
 
-		# Reset voice to default at the start of each utterance so that
-		# language overrides from the previous sequence don't leak into
-		# untagged speech (issue #97).
-		if getattr(self, "_languageOverrideActive", False):
+		# Language override reset (issue #97).
+		# Two paths: if cancel() preceded this speak(), suppress the first
+		# LangChangeCommand that re-applies the cleared language (it is stale
+		# context from NVDA's SpeechManager).  If no cancel (e.g. sayAll),
+		# reset the voice but honour subsequent LangChangeCommands normally.
+		cancelled_voice = getattr(self, "_cancelledOverrideVoice", None)
+		if cancelled_voice is not None:
+			default_voice = getattr(self, "_defaultVoice", None)
+			if default_voice is not None:
+				try:
+					outlist.append((_eloquence.set_voice, (int(default_voice),)))
+				except (TypeError, ValueError):
+					pass
+			cleared_override_voice = str(cancelled_voice)
+			self._cancelledOverrideVoice = None
+		elif getattr(self, "_languageOverrideActive", False):
 			default_voice = getattr(self, "_defaultVoice", None)
 			if default_voice is not None:
 				try:
@@ -930,6 +944,22 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 					log.debug("No Eloquence voice mapped for language '%s'", item.lang)
 					continue
 				voice_str = str(voice_id)
+				# Suppress a stale leading LangChangeCommand that re-applies
+				# the language we just cleared after cancel() (issue #97).
+				if (
+					cleared_override_voice is not None
+					and not queued_speech
+					and voice_str == cleared_override_voice
+				):
+					log.debug(
+						"Suppressing stale LangChangeCommand('%s') matching cancelled override voice %s",
+						item.lang,
+						cleared_override_voice,
+					)
+					cleared_override_voice = None
+					continue
+				if cleared_override_voice is not None:
+					cleared_override_voice = None
 				if voice_str == self.curvoice:
 					if item.lang is None:
 						self._languageOverrideActive = False
@@ -1205,6 +1235,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		return _eloquence.lastindex
 
 	def cancel(self):
+		if getattr(self, "_languageOverrideActive", False):
+			self._cancelledOverrideVoice = self.curvoice
+			default_voice = getattr(self, "_defaultVoice", None)
+			if default_voice is not None:
+				self.curvoice = str(default_voice)
+			self._languageOverrideActive = False
 		_eloquence.stop()
 
 	def _getAvailableVariants(self):
