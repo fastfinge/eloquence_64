@@ -10,14 +10,14 @@ This is an NVDA add-on that provides the Eloquence speech synthesizer for 64-bit
 
 ### Initial Setup
 ```bash
-pip install scons
-py -3.13-32 -m pip install pyinstaller
+winget install --id astral-sh.uv
+py install 3.13-32
 python fetch_eci.py          # Downloads proprietary ECI.DLL + .SYN files from upstream
 ```
 
 ### Building the Add-on
 ```bash
-scons
+scons.bat
 ```
 
 This produces `eloquence-12.nvda-addon` (version number comes from `buildVars.py`).
@@ -27,13 +27,13 @@ This produces `eloquence-12.nvda-addon` (version number comes from `buildVars.py
 build_host.cmd
 ```
 
-This compiles the host executable with PyInstaller (requires 32-bit Python 3.13) and copies it into `addon/synthDrivers/`.
+This compiles the host executable with PyInstaller from the `uv` `host-build` dependency group (requires 32-bit Python 3.13) and copies it into `addon/synthDrivers/`.
 
 ### Full Rebuild from Scratch
 ```bash
 python fetch_eci.py          # One-time: get proprietary files
 build_host.cmd               # If host changed
-scons
+scons.bat
 ```
 
 ## Architecture

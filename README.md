@@ -67,9 +67,8 @@ background.
 ### Prerequisites
 
 - [Python Install Manager](https://www.python.org/ftp/python/pymanager/python-manager-25.0.msix) (`.msix`)
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - 32-bit Python 3.13: `py install 3.13-32`
-- SCons: `pip install scons`
-- PyInstaller for 32-bit: `py -3.13-32 -m pip install pyinstaller`
 
 ### Build steps
 
@@ -77,8 +76,19 @@ background.
 git submodule init && git submodule update   # fetch pronunciation dictionaries
 python fetch_eci.py                          # one-time: download proprietary ECI.DLL + voice data
 build_host.cmd                               # compile 32-bit host exe (only needed if host_eloquence32.py changes)
-scons                                        # package everything into the .nvda-addon file
+scons.bat                                    # package everything into the .nvda-addon file
 ```
 
-**Note:** `scons` validates that proprietary files and the host exe exist, but does not fetch or build them — steps 2 and 3 must be done first.
+**Note:** `scons.bat` validates that proprietary files and the host exe exist, but does not fetch or build them — steps 2 and 3 must be done first.
 
+### Development checks
+
+```bash
+runlint.bat      # run Ruff using the locked uv environment
+runpytest.bat    # run pytest using the locked uv environment
+```
+
+Tooling dependencies are pinned in `pyproject.toml` and `uv.lock`, following
+NVDA's current dependency-group pattern. The 32-bit host build uses a separate
+`.venv32` environment so PyInstaller can run under 32-bit Python without
+replacing the normal development `.venv`.
