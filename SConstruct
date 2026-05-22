@@ -3,6 +3,7 @@
 
 import os
 import sys
+import glob
 from pathlib import Path
 
 from SCons.Script import Environment, EnsurePythonVersion
@@ -20,8 +21,6 @@ env.Append(**buildVars.addon_info)
 addonDir = Path("addon")
 
 # --- Compile translations (.po -> .mo) -------------------------------------
-
-import glob
 
 # Find all .po files under addon/locale
 poFiles = glob.glob("addon/locale/*/LC_MESSAGES/*.po")
