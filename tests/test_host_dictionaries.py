@@ -77,6 +77,16 @@ class DictionaryLoadingTests(unittest.TestCase):
 			),
 		)
 
+	def test_dictionary_candidates_allow_english_fallback_for_chinese(self):
+		self.assertEqual(
+			host.get_dictionary_candidates("chs"),
+			(
+				("chsmain.dic", "enumain.dic", "main.dic"),
+				("chsroot.dic", "enuroot.dic", "root.dic"),
+				("chsabbr.dic", "enuabbr.dic", "abbr.dic"),
+			),
+		)
+
 	def test_loads_current_language_dictionaries_not_hard_coded_enu(self):
 		with tempfile.TemporaryDirectory() as data_directory:
 			for name in ("enumain.dic", "espmain.dic", "esproot.dic"):

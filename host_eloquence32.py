@@ -137,6 +137,7 @@ DICTIONARY_LANGUAGE_FALLBACKS: Dict[str, tuple[str, ...]] = {
 	"eng": ("enu",),
 	"esm": ("esp",),
 	"frc": ("fra",),
+	"chs": ("enu",),
 }
 
 LOGGER = logging.getLogger("eloquence.host")
