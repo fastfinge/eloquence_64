@@ -654,7 +654,6 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 						# 4. WRITE UPDATES (Strictly CP1252)
 						if lines_to_append:
 							with open(dest_path, "a", encoding="cp1252") as f:
-								f.write("\n")
 								for item in lines_to_append:
 									f.write(f"{item}\n")
 							updates_count += len(lines_to_append)
