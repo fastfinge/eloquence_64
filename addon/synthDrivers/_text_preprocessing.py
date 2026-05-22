@@ -114,10 +114,27 @@ _CHINESE_ID = (393216,)  # chs
 _KOREAN_ID = (655360,)  # kor
 _ASIAN_IDS = (393216, 524288, 655360)  # chs, jpn, kor
 
+_CHS_TRADITIONAL_FALLBACKS = str.maketrans(
+	{
+		"選": "选",
+		"設": "设",
+		"檢": "检",
+	}
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _normalize_chinese_for_chs(text):
+	"""Apply issue-specific Traditional fallbacks for the Simplified CHS path.
+
+	This is a compatibility shim for the current zh-CN voice, not full
+	Traditional Chinese support.
+	"""
+	return text.translate(_CHS_TRADITIONAL_FALLBACKS)
+
+
 def _strip_accents(s):
 	"""Remove combining marks, leaving base characters."""
 	return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
@@ -202,6 +219,8 @@ def preprocess(text, voice_id):
 		text = _resub(french_fixes, text)
 	if voice_id in _GERMAN_IDS:
 		text = _resub(german_fixes, text)
+	if voice_id in _CHINESE_ID:
+		text = _normalize_chinese_for_chs(text)
 	# Asian languages use multi-byte characters that would be corrupted
 	if voice_id not in _ASIAN_IDS:
 		text = _normalize_text(text)
