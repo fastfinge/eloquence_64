@@ -4,6 +4,7 @@
 import glob
 import os
 import sys
+import glob
 from pathlib import Path
 
 from SCons.Script import Environment, EnsurePythonVersion
