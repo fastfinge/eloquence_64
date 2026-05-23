@@ -132,8 +132,27 @@ LANGS: Dict[str, int] = {
 	"jpn": 524288,  # Japanese (0x00080000)
 	"kor": 655360,  # Korean (0x000A0000)
 }
+LANG_BY_ID: Dict[int, str] = {voice_id: language_code for language_code, voice_id in LANGS.items()}
+DICTIONARY_LANGUAGE_FALLBACKS: Dict[str, tuple[str, ...]] = {
+	"eng": ("enu",),
+	"esm": ("esp",),
+	"frc": ("fra",),
+	"chs": ("enu",),
+}
 
 LOGGER = logging.getLogger("eloquence.host")
+
+
+def get_dictionary_candidates(language_code: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+	"""Return main/root/abbreviation dictionary candidates for an Eloquence language."""
+	language_code = (language_code or "enu").lower()
+	language_codes = (language_code, *DICTIONARY_LANGUAGE_FALLBACKS.get(language_code, ()))
+	include_generic = any(code in {"enu", "eng"} for code in language_codes)
+	return (
+		(*(f"{code}main.dic" for code in language_codes), *(("main.dic",) if include_generic else ())),
+		(*(f"{code}root.dic" for code in language_codes), *(("root.dic",) if include_generic else ())),
+		(*(f"{code}abbr.dic" for code in language_codes), *(("abbr.dic",) if include_generic else ())),
+	)
 
 
 def configure_logging(log_dir: Optional[str]) -> None:
@@ -172,6 +191,8 @@ class EloquenceRuntime:
 		self._dll = None  # type: ignore[assignment]
 		self._handle = None  # type: ignore[assignment]
 		self._dictionary_handle = None
+		self._dictionary_handles: Dict[str, object] = {}
+		self._loaded_dictionary_languages: set[str] = set()
 		self._callback = Callback(self._on_callback)
 		self._audio_buffer = BytesIO()
 		self._samples = 3300
@@ -239,8 +260,6 @@ class EloquenceRuntime:
 		result = self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer)
 		if not result:
 			raise RuntimeError("eciSetOutputBuffer failed")
-		self._dictionary_handle = self._dll.eciNewDict(handle)
-		self._dll.eciSetDict(handle, self._dictionary_handle)
 		# Allow annotated input so that backquote commands are interpreted instead of spoken.
 		self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
 		self._params[ECI_INPUT_TYPE] = 1
@@ -260,19 +279,25 @@ class EloquenceRuntime:
 			self._dll.eciSetParam(handle, 41, 1)
 
 	def _load_dictionaries(self) -> None:
+		language_code = (self._config.language_code or "enu").lower()
 		dictionary_dir = get_short_path(self._config.data_directory)
 		# LOGGER.debug("Loading dictionaries from %s", dictionary_dir)
-		main_candidates = ["enumain.dic", "main.dic"]
-		root_candidates = ["enuroot.dic", "root.dic"]
-		abbr_candidates = ["enuabbr.dic", "abbr.dic"]
+		dictionary_candidates = get_dictionary_candidates(language_code)
+		self._dictionary_handle = self._dictionary_handles.get(language_code)
+		if self._dictionary_handle is None:
+			self._dictionary_handle = self._dll.eciNewDict(self._handle)
+			self._dictionary_handles[language_code] = self._dictionary_handle
 
-		for index, candidates in enumerate((main_candidates, root_candidates, abbr_candidates)):
-			for candidate in candidates:
-				path = os.path.join(dictionary_dir, candidate)
-				if os.path.exists(path):
-					# LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
-					self._dll.eciLoadDict(self._handle, self._dictionary_handle, index, path.encode("mbcs"))
-					break
+		if language_code not in self._loaded_dictionary_languages:
+			for index, candidates in enumerate(dictionary_candidates):
+				for candidate in candidates:
+					path = os.path.join(dictionary_dir, candidate)
+					if os.path.exists(path):
+						# LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
+						self._dll.eciLoadDict(self._handle, self._dictionary_handle, index, path.encode("mbcs"))
+						break
+			self._loaded_dictionary_languages.add(language_code)
+		self._dll.eciSetDict(self._handle, self._dictionary_handle)
 
 	# ------------------------------------------------------------------
 	# Public API invoked from the controller
@@ -313,6 +338,15 @@ class EloquenceRuntime:
 	def delete(self) -> None:
 		# LOGGER.debug("Deleting Eloquence handle")
 		if self._handle:
+			if self._dll:
+				for dictionary_handle in self._dictionary_handles.values():
+					try:
+						self._dll.eciDeleteDict(self._handle, dictionary_handle)
+					except Exception:
+						LOGGER.exception("Failed to delete Eloquence dictionary")
+			self._dictionary_handles.clear()
+			self._loaded_dictionary_languages.clear()
+			self._dictionary_handle = None
 			self._dll.eciDelete(self._handle)
 			self._handle = None
 
@@ -322,6 +356,8 @@ class EloquenceRuntime:
 		self._params[param_id] = value
 		# When changing voice (param 9), update all voice parameters
 		if param_id == 9:
+			self._config.language_code = LANG_BY_ID.get(value, "enu")
+			self._load_dictionaries()
 			# LOGGER.debug("Voice changed, reading voice parameters")
 			for param in (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH):
 				self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)

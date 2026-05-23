@@ -2,10 +2,8 @@
 name = "eloquence-64"
 version = "0.0.0"  # Not used — addon version comes from git tags via buildVars.py
 description = "Eloquence synthesizer for 64-bit NVDA"
-requires-python = ">=3.13"
-dependencies = [
-    "pyinstaller>=6.17.0",
-]
+requires-python = ">=3.13,<3.14"
+dependencies = []
 
 [tool.ruff]
 line-length = 110
@@ -50,3 +48,23 @@ max-complexity = 15
 "addon/synthDrivers/eloquence.py" = ["E402", "F403", "F405"]
 # getLanguage import is a side-effect check for NVDA environment detection
 "addon/synthDrivers/_eloquence_updater.py" = ["F401"]
+
+[tool.uv]
+default-groups = "all"
+environments = ["sys_platform == 'win32'"]
+python-preference = "only-system"
+required-version = ">=0.9"
+
+[dependency-groups]
+dev = [
+	"SCons==4.10.1",
+]
+host-build = [
+	"pyinstaller==6.17.0",
+]
+lint = [
+	"ruff==0.15.14",
+]
+unit-tests = [
+	"pytest==9.0.3",
+]
