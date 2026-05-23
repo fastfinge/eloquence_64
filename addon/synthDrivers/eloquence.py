@@ -862,11 +862,20 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		outlist = []
 		pending_indexes = []
 		queued_speech = False
+		sequence_voice = getattr(self, "_defaultVoice", str(_eloquence.params.get(9, 65536)))
+		last_queued_engine_voice = getattr(self, "_lastEngineVoice", None)
 
 		# Reset prosody to baseline at the start of each utterance to prevent
 		# state leaks from previous speech sequences (issue #59).
 		for pr in (_eloquence.rate, _eloquence.pitch, _eloquence.vlm):
 			outlist.append((_eloquence.cmdProsody, (pr, 1, 0)))
+
+		if last_queued_engine_voice != sequence_voice:
+			try:
+				outlist.append((_eloquence.set_voice, (int(sequence_voice),)))
+				last_queued_engine_voice = sequence_voice
+			except (TypeError, ValueError):
+				log.debug("Skipping default voice reset for invalid voice id %r", sequence_voice)
 
 		# IBMTTS Logic: Combine strings before processing regex
 		speechSequence = self.combine_adjacent_strings(speechSequence)
@@ -874,7 +883,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		for item in speechSequence:
 			if isinstance(item, str):
 				s = str(item)
-				s = self.xspeakText(s)
+				s = self.xspeakText(s, voice_id=sequence_voice)
 				outlist.append((_eloquence.speak, (s,)))
 				last = s
 				queued_speech = True
@@ -918,9 +927,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 					log.debug("No Eloquence voice mapped for language '%s'", item.lang)
 					continue
 				voice_str = str(voice_id)
-				if voice_str == self.curvoice:
-					if item.lang is None:
-						self._languageOverrideActive = False
+				if voice_str == sequence_voice:
 					continue
 				try:
 					queued_voice = int(voice_id)
@@ -932,7 +939,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 					)
 					continue
 				outlist.append((_eloquence.set_voice, (queued_voice,)))
-				self._update_voice_state(queued_voice, update_default=item.lang is None)
+				sequence_voice = voice_str
+				last_queued_engine_voice = voice_str
 			elif type(item) in self.PROSODY_ATTRS:
 				pr = self.PROSODY_ATTRS[type(item)]
 				# Use the raw _offset/_multiplier values directly, NOT the
@@ -961,6 +969,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 					func(*args)
 				except Exception:
 					log.exception("Synthesis command failed")
+			self._lastEngineVoice = last_queued_engine_voice
 			for index in pending_indexes:
 				synthIndexReached.notify(synth=self, index=index)
 			synthDoneSpeaking.notify(synth=self)
@@ -975,12 +984,19 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 		outlist.append((_eloquence.index, (0xFFFF,)))
 		outlist.append((_eloquence.synth, ()))
+		self._lastEngineVoice = last_queued_engine_voice
 		seq = _eloquence._client._sequence
 		_eloquence.synth_queue.put((outlist, seq))
 		_eloquence.process()
 
-	def xspeakText(self, text, should_pause=False):
-		text = _text_preprocessing.preprocess(text, _eloquence.params[9])
+	def xspeakText(self, text, voice_id=None, should_pause=False):
+		if voice_id is None:
+			voice_id = getattr(self, "_defaultVoice", _eloquence.params.get(9))
+		try:
+			voice_id = int(voice_id)
+		except (TypeError, ValueError):
+			log.debug("Preprocessing text with invalid voice id %r; using raw value", voice_id)
+		text = _text_preprocessing.preprocess(text, voice_id)
 		if not self._backquoteVoiceTags:
 			text = text.replace("`", " ")
 		text = "`vv%d %s" % (
@@ -1128,7 +1144,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		return o
 
 	def _get_voice(self):
-		return str(_eloquence.params[9])
+		return getattr(self, "_defaultVoice", str(_eloquence.params[9]))
 
 	def _set_voice(self, vl):
 		_eloquence.set_voice(vl)
@@ -1142,11 +1158,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			log.debug("Unable to coerce Eloquence voice id '%s' to int", voice_id)
 		if update_default or not getattr(self, "_defaultVoice", None):
 			self._defaultVoice = voice_str
-		self.curvoice = voice_str
-		current_default = getattr(self, "_defaultVoice", None)
-		self._languageOverrideActive = (
-			(not update_default) and current_default is not None and voice_str != current_default
-		)
+		self.curvoice = self._defaultVoice
+		self._lastEngineVoice = voice_str
+		self._languageOverrideActive = False
 
 	def _resolve_voice_for_language(self, language):
 		if not language:
@@ -1193,6 +1207,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		return _eloquence.lastindex
 
 	def cancel(self):
+		self._lastEngineVoice = None
+		self._languageOverrideActive = False
 		_eloquence.stop()
 
 	def _getAvailableVariants(self):
