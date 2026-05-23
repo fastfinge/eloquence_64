@@ -1,9 +1,9 @@
 # Eloquence NVDA add-on SConstruct
 # Generates manifest.ini from template + buildVars, then zips addon/ into .nvda-addon.
 
+import glob
 import os
 import sys
-import glob
 from pathlib import Path
 
 from SCons.Script import Environment, EnsurePythonVersion
@@ -85,7 +85,6 @@ for p in Path("addon").rglob("*"):
 potFile = Path(f"{env['addon_name']}.pot")
 
 # Collect all Python sources inside addon/
-pySources = [str(p) for p in addonDir.rglob("*.py")]
 pySources = [str(p) for p in addonDir.rglob("*.py")]
 pySources.append("buildVars.py")
 

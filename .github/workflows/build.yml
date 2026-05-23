@@ -8,34 +8,38 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2025
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up 64-bit Python 3.13
         id: py64
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           architecture: x64
 
       - name: Set up 32-bit Python 3.13
         id: py32
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           architecture: x86
           update-environment: false
 
-      - name: Install SCons
-        run: pip install scons
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Install PyInstaller (32-bit)
-        run: ${{ steps.py32.outputs.python-path }} -m pip install pyinstaller
+      - name: Check locked dependencies
+        run: uv lock --check
+
+      - name: Lint
+        run: runlint.bat
+        shell: cmd
 
       - name: Install MSYS2 / gettext
         uses: msys2/setup-msys2@v2
@@ -51,13 +55,14 @@ jobs:
         run: python fetch_eci.py
 
       - name: Build 32-bit host
-        run: |
-          ${{ steps.py32.outputs.python-path }} -m PyInstaller --onefile --noconsole --name eloquence_host32 host_eloquence32.py
-          copy dist\eloquence_host32.exe addon\synthDrivers\eloquence_host32.exe
+        run: build_host.cmd
         shell: cmd
+        env:
+          PYTHON32: ${{ steps.py32.outputs.python-path }}
 
       - name: Build addon
-        run: scons && scons pot
+        run: scons.bat && scons.bat pot
+        shell: cmd
 
       - name: Upload add-on artifact
         uses: actions/upload-artifact@v7
