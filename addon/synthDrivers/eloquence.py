@@ -278,7 +278,7 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 		# Import update manager
 		sys.path.insert(0, addon_dir)
 		try:
-			from _eloquence_updater import EloquenceUpdateManager, show_update_dialog
+			from _eloquence_updater import EloquenceUpdateManager
 		except ImportError as e:
 			wx.MessageBox(
 				# Translators: Text of a message dialog when updating the add-on
@@ -371,24 +371,22 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				cont, skip = progress.Update(percent, message)
 				return cont
 
-			zip_path = manager.download_update(download_url, download_progress)
-
-			# Extract update
-			# Translators: Text of a progress dialog when updating the add-on
-			progress.Update(0, _("Extracting update..."))
-			manager.extract_update(zip_path, download_progress)
-
-			# Analyze changes
-			# Translators: Text of a progress dialog when updating the add-on
-			progress.Update(0, _("Analyzing changes..."))
-			changes = manager.analyze_changes(download_progress)
-
+			addon_path = manager.download_update(download_url, download_progress)
+			progress.Update(100, _("Download complete"))
 			progress.Destroy()
 
-			# Show update dialog with detailed changes
-			apply_update, decisions = show_update_dialog(self, changes, latest_version)
-
-			if not apply_update:
+			progress = wx.ProgressDialog(
+				# Translators: Text of a progress dialog when updating the add-on
+				_("Installing Update"),
+				# Translators: Text of a progress dialog when updating the add-on
+				_("Please wait..."),
+				maximum=100,
+				parent=self,
+				style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE,
+			)
+			progress.Pulse(_("Installing add-on package..."))
+			if not manager.install_update(addon_path, self):
+				progress.Destroy()
 				manager.cleanup()
 				wx.MessageBox(
 					# Translators: Text of a message dialog when updating the add-on
@@ -398,39 +396,19 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 					wx.OK | wx.ICON_INFORMATION,
 				)
 				return
-
-			# Apply update with progress
-			progress = wx.ProgressDialog(
-				# Translators: Text of a progress dialog when updating the add-on
-				_("Applying Update"),
-				# Translators: Text of a progress dialog when updating the add-on
-				_("Please wait..."),
-				maximum=100,
-				parent=self,
-				style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE,
-			)
-
-			def merge_progress(percent, message):
-				progress.Update(percent, message)
-
-			manager.smart_merge(changes, decisions, merge_progress)
-
 			progress.Destroy()
+			manager.cleanup()
 
-			# Success!
 			wx.MessageBox(
 				_(
 					# Translators: Text of a message dialog when updating the add-on
-					"Update to {latest_version} applied successfully!\n\n"
-					"Please restart NVDA for changes to take effect."
+					"Update to {latest_version} installed successfully and will be applied after NVDA restarts."
 				).format(latest_version=latest_version),
 				# Translators: Title of a message dialog when updating the add-on
 				_("Update Successful"),
 				wx.OK | wx.ICON_INFORMATION,
 			)
-
-			# Cleanup
-			manager.cleanup()
+			manager.prompt_for_restart()
 
 		except Exception as e:
 			progress.Destroy()

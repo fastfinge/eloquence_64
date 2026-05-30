@@ -1,93 +1,14 @@
 import os
 import json
 import urllib.request
-import zipfile
 import shutil
 import logging
-import wx
 import re
 import addonHandler
 
 addonHandler.initTranslation()
 
 log = logging.getLogger(__name__)
-
-
-class UpdateChangesDialog(wx.Dialog):
-	def __init__(self, parent, changes, latest_version):
-		# Translators: Title of the Review Update Changes dialog used during add-on update.
-		super().__init__(parent, title=_("Review Update Changes"), size=(500, 400))
-
-		main_sizer = wx.BoxSizer(wx.VERTICAL)
-
-		# Summary text
-		# Translators: Text in the Review Update Changes dialog used during add-on update.
-		summary = _("Update to version {latest_version} includes the following changes:").format(
-			latest_version=latest_version
-		)
-		main_sizer.Add(wx.StaticText(self, label=summary), 0, wx.ALL, 10)
-
-		# List of changes
-		self.list_ctrl = wx.ListCtrl(self, style=wx.LC_REPORT | wx.BORDER_SUNKEN)
-		# Translators: Column header in the Review Update Changes dialog used during add-on update.
-		self.list_ctrl.InsertColumn(0, _("Action"), width=100)
-		# Translators: Column header in the Review Update Changes dialog used during add-on update.
-		self.list_ctrl.InsertColumn(1, _("File"), width=350)
-
-		idx = 0
-		for f in changes["added"]:
-			self.list_ctrl.InsertItem(idx, _("Add"))
-			self.list_ctrl.SetItem(idx, 1, f)
-			idx += 1
-		for f in changes["modified"]:
-			# Translators: Action name used in the list of the Review Update Changes dialog used during add-on update.
-			self.list_ctrl.InsertItem(idx, _("Update"))
-			self.list_ctrl.SetItem(idx, 1, f)
-			idx += 1
-		for f in changes["deleted"]:
-			# Translators: Action name used in the list of the Review Update Changes dialog used during add-on update.
-			self.list_ctrl.InsertItem(idx, _("Delete"))
-			self.list_ctrl.SetItem(idx, 1, f)
-			idx += 1
-
-		main_sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 10)
-
-		# Info about preserved files
-		if changes["preserved"]:
-			# Translators: Text in the Review Update Changes dialog used during add-on update.
-			p_text = _(
-				"Note: {n} local configuration/dictionary files will be preserved.",
-			).format(n=len(changes["preserved"]))
-			main_sizer.Add(wx.StaticText(self, label=p_text), 0, wx.ALL, 10)
-
-		# Buttons
-		btn_sizer = self.CreateButtonSizer(wx.OK | wx.CANCEL)
-		main_sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
-
-		self.SetSizer(main_sizer)
-		self.Layout()
-
-
-def show_update_dialog(parent, changes, latest_version):
-	"""
-	Shows a dialog with the changes and returns (apply_update, decisions).
-	"""
-	dlg = UpdateChangesDialog(parent, changes, latest_version)
-	result = dlg.ShowModal()
-	dlg.Destroy()
-
-	if result != wx.ID_OK:
-		return False, {}
-
-	decisions = {}
-	for f in changes["added"]:
-		decisions[f] = "add"
-	for f in changes["modified"]:
-		decisions[f] = "update"
-	for f in changes["deleted"]:
-		decisions[f] = "delete"
-
-	return True, decisions
 
 
 class EloquenceUpdateManager:
@@ -97,7 +18,6 @@ class EloquenceUpdateManager:
 	def __init__(self, addon_dir):
 		self.addon_dir = os.path.abspath(addon_dir)
 		self.temp_dir = os.path.join(self.addon_dir, "temp_update")
-		self.extract_dir = os.path.join(self.temp_dir, "extracted")
 		self.CURRENT_VERSION = self._get_current_version()
 
 	def _get_current_version(self):
@@ -129,16 +49,15 @@ class EloquenceUpdateManager:
 			latest_version = data.get("tag_name", "0.0.0").lstrip("v")
 			download_url = None
 
-			# Look for .nvda-addon or .zip in assets
+			# Standard NVDA installation requires a packaged add-on bundle.
 			assets = data.get("assets", [])
 			for asset in assets:
 				if asset["name"].endswith(".nvda-addon"):
 					download_url = asset["browser_download_url"]
 					break
 
-			# If no assets, use the source zip
 			if not download_url:
-				download_url = data.get("zipball_url")
+				raise RuntimeError(_("Latest release does not include an NVDA add-on package."))
 
 			changelog = data.get("body", "No changelog provided.")
 
@@ -161,11 +80,11 @@ class EloquenceUpdateManager:
 			return latest != current
 
 	def download_update(self, download_url, progress_callback):
-		"""Downloads the update and returns the path to the zip file"""
+		"""Downloads the update and returns the path to the add-on package."""
 		if not os.path.exists(self.temp_dir):
 			os.makedirs(self.temp_dir)
 
-		zip_path = os.path.join(self.temp_dir, "update.zip")
+		addon_path = os.path.join(self.temp_dir, "update.nvda-addon")
 
 		try:
 			headers = {"User-Agent": "NVDA-Eloquence-Updater"}
@@ -175,7 +94,7 @@ class EloquenceUpdateManager:
 				downloaded = 0
 				block_size = 8192
 
-				with open(zip_path, "wb") as f:
+				with open(addon_path, "wb") as f:
 					while True:
 						buffer = response.read(block_size)
 						if not buffer:
@@ -189,155 +108,27 @@ class EloquenceUpdateManager:
 								percent, _("Downloading update... {percent}%").format(percent=percent)
 							):
 								raise Exception("Download cancelled by user")
-			return zip_path
+			return addon_path
 		except Exception as e:
 			log.error(f"Error downloading update: {e}")
 			raise
 
-	def extract_update(self, zip_path, progress_callback):
-		"""Extracts the zip file to a temporary directory"""
-		if os.path.exists(self.extract_dir):
-			shutil.rmtree(self.extract_dir)
-		os.makedirs(self.extract_dir)
-
+	def install_update(self, addon_path, parent=None):
+		"""Installs the downloaded package through NVDA's add-on install machinery."""
 		try:
-			with zipfile.ZipFile(zip_path, "r") as zip_ref:
-				files = zip_ref.namelist()
-				total_files = len(files)
-				for i, file in enumerate(files):
-					zip_ref.extract(file, self.extract_dir)
-					percent = int((i + 1) * 100 / total_files)
-					# Translators: Text in the progress dialog used during add-on update.
-					if not progress_callback(percent, _("Extracting... {percent}%").format(percent=percent)):
-						raise Exception("Extraction cancelled by user")
+			from addonStore.install import installAddon
+		except ImportError:
+			from gui import addonGui
 
-			# If it's a GitHub zipball, it extracts into a subfolder
-			contents = os.listdir(self.extract_dir)
-			if len(contents) == 1 and os.path.isdir(os.path.join(self.extract_dir, contents[0])):
-				# Move everything up one level
-				subfolder = os.path.join(self.extract_dir, contents[0])
-				for item in os.listdir(subfolder):
-					dest = os.path.join(self.extract_dir, item)
-					if os.path.exists(dest):
-						if os.path.isdir(dest):
-							shutil.rmtree(dest)
-						else:
-							os.remove(dest)
-					shutil.move(os.path.join(subfolder, item), self.extract_dir)
-				os.rmdir(subfolder)
+			return addonGui.installAddon(parent, addon_path)
 
-		except Exception as e:
-			log.error(f"Error extracting update: {e}")
-			raise
+		installAddon(addon_path)
+		return True
 
-	def analyze_changes(self, progress_callback):
-		"""
-		Analyzes differences between current install and update.
-		Returns a dictionary of changes.
-		"""
-		changes = {
-			"added": [],
-			"modified": [],
-			"deleted": [],
-			"preserved": [],  # Files we want to keep as is
-		}
+	def prompt_for_restart(self):
+		from gui.addonGui import promptUserForRestart
 
-		# Files to always preserve (don't overwrite if exist)
-		preserve_list = ["ECI.INI", "synthDrivers\\eloquence\\"]  # Custom dictionaries
-
-		# Walk through the update files
-		for root, dirs, files in os.walk(self.extract_dir):
-			rel_path = os.path.relpath(root, self.extract_dir)
-			if rel_path == ".":
-				rel_path = ""
-
-			for file in files:
-				file_rel_path = os.path.join(rel_path, file)
-				current_path = os.path.join(self.addon_dir, "../", file_rel_path)
-
-				# Check if it should be preserved
-				is_preserved = False
-				for p in preserve_list:
-					if file_rel_path.startswith(p):
-						is_preserved = True
-						break
-
-				if is_preserved and os.path.exists(current_path):
-					changes["preserved"].append(file_rel_path)
-					continue
-
-				if not os.path.exists(current_path):
-					changes["added"].append(file_rel_path)
-				else:
-					changes["modified"].append(file_rel_path)
-
-		# Check for deleted files
-		exclude_from_deletion = [".git", "temp_update", ".venv", "__pycache__", "eloquence"]
-		for root, dirs, files in os.walk(self.addon_dir):
-			rel_path = os.path.relpath(root, self.addon_dir)
-			if rel_path == ".":
-				rel_path = ""
-
-			if any(rel_path.startswith(e) for e in exclude_from_deletion):
-				continue
-
-			for file in files:
-				file_rel_path = os.path.join(rel_path, file)
-				if any(file_rel_path.startswith(e) for e in exclude_from_deletion):
-					continue
-
-				update_path = os.path.join(self.extract_dir, file_rel_path)
-				if not os.path.exists(update_path):
-					# Check if it's in preserve list
-					is_preserved = False
-					for p in preserve_list:
-						if file_rel_path.startswith(p):
-							is_preserved = True
-							break
-					if not is_preserved:
-						changes["deleted"].append(file_rel_path)
-
-		# Translators: Text in the progress dialog used during add-on update.
-		progress_callback(100, _("Analysis complete"))
-		return changes
-
-	def smart_merge(self, changes, decisions, merge_progress):
-		"""Applies the changes based on user decisions"""
-		total_steps = len(decisions)
-		if total_steps == 0:
-			# Translators: Text in the progress dialog used during add-on update.
-			merge_progress(100, _("No changes to apply"))
-			return
-
-		for i, (file_rel_path, action) in enumerate(decisions.items()):
-			src = os.path.join(self.extract_dir, file_rel_path)
-			dst = os.path.join(self.addon_dir, "../", file_rel_path)
-
-			percent = int((i + 1) * 100 / total_steps)
-			# Translators: Text in the progress dialog used during add-on update.
-			merge_progress(percent, _("Applying: {path}").format(path=file_rel_path))
-
-			try:
-				if action in ("update", "add"):
-					if os.path.isdir(src):
-						if not os.path.exists(dst):
-							os.makedirs(dst)
-					else:
-						dst_dir = os.path.dirname(dst)
-						if not os.path.exists(dst_dir):
-							os.makedirs(dst_dir)
-						shutil.copy2(src, dst)
-				elif action == "delete":
-					if os.path.exists(dst):
-						if os.path.isdir(dst):
-							shutil.rmtree(dst)
-						else:
-							os.remove(dst)
-			except Exception as e:
-				log.error(f"Error applying change to {file_rel_path}: {e}")
-
-		# Translators: Text in the progress dialog used during add-on update.
-		merge_progress(100, _("Update complete"))
+		promptUserForRestart()
 
 	def cleanup(self):
 		"""Removes temporary files"""
