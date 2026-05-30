@@ -8,6 +8,20 @@ This is an NVDA add-on that provides the Eloquence speech synthesizer for 64-bit
 
 `CONTEXT.md` is the canonical glossary for this repository. Use those terms in new docs, issues, diagnostics, and architecture discussions. In particular, prefer "Eloquence Host Process" over "helper process", "Host Channel" over generic IPC wording when discussing the domain relationship, and "Speech Progress Notification" when discussing NVDA index/completion reporting.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage uses the default five-label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a single-context domain-doc layout. See `docs/agents/domain.md`.
+
 ## Build Commands
 
 ### Initial Setup
