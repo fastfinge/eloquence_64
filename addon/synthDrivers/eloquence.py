@@ -398,16 +398,6 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				return
 			progress.Destroy()
 			manager.cleanup()
-
-			wx.MessageBox(
-				_(
-					# Translators: Text of a message dialog when updating the add-on
-					"Update to {latest_version} installed successfully and will be applied after NVDA restarts."
-				).format(latest_version=latest_version),
-				# Translators: Title of a message dialog when updating the add-on
-				_("Update Successful"),
-				wx.OK | wx.ICON_INFORMATION,
-			)
 			manager.prompt_for_restart()
 
 		except Exception as e:
