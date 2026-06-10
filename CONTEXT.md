@@ -56,6 +56,10 @@ _Avoid_: sanitization, normalization, regex fixes
 The character encoding used when sending Eloquence Text bytes to the Eloquence Engine for the active Voice Identity.
 _Avoid_: MBCS, language encoding, current lang
 
+**Script Conversion**:
+The Traditional-to-Simplified Chinese transformation applied during Text Preprocessing whenever the Mandarin Chinese Voice Identity is active, so Traditional-script text is pronounceable by the Simplified-only engine data.
+_Avoid_: T2S, fallback, traditional fallback, OpenCC conversion, CHS fallback
+
 ### Voice Model
 
 **Voice Identity**:
