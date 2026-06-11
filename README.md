@@ -13,6 +13,24 @@ For development scenarios where the prebuilt Eloquence Host Process executable i
 the `ELOQUENCE_HOST_COMMAND` environment variable can be set to the command that
 launches a compatible 32-bit Python interpreter with `host_eloquence32.py`.
 
+## Traditional Chinese Script Conversion
+
+When the Mandarin Chinese voice is selected, Text Preprocessing applies Script
+Conversion before text is sent to the Eloquence Engine. Traditional Chinese
+text is read via Traditional→Simplified conversion with the Mandarin Chinese
+voice.
+
+This is not zh-TW support, a Traditional Chinese voice, or Cantonese support.
+The add-on's Chinese Voice Identity still advertises only `zh-CN`.
+
+Known limitations:
+
+- Hong Kong (`zh-HK`) users get Mandarin readings, not Cantonese.
+- Colloquial written-Cantonese characters, such as `嘅`, `哋`, and `咗`,
+  are unpronounceable.
+- A zh-TW-localized NVDA install does not auto-select the Chinese voice on
+  first run. Users need to pick the Chinese voice once manually.
+
 ## Eloquence on secure screens (logon, UAC, start-up)
 
 NVDA does **not** copy `*.exe` files to its Secure Screen configuration for
