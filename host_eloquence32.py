@@ -20,6 +20,7 @@ import pickle
 import socket
 import struct
 import sys
+import tempfile
 import threading
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
@@ -96,6 +97,59 @@ def get_short_path(path):
 			buf_size = needed
 	except Exception:
 		return path
+
+
+def _split_line_ending(line: str) -> tuple[str, str]:
+	if line.endswith("\r\n"):
+		return line[:-2], "\r\n"
+	if line.endswith("\n"):
+		return line[:-1], "\n"
+	return line, ""
+
+
+def _rewrite_eci_ini_paths(ini_content: str, eloquence_dir: str) -> str:
+	if not ini_content.strip():
+		raise RuntimeError(
+			"ECI.INI is empty. Re-copy Eloquence to NVDA's system configuration before using secure screens."
+		)
+
+	short_eloquence_dir = get_short_path(eloquence_dir)
+	rewritten_lines = []
+	for line in ini_content.splitlines(keepends=True):
+		body, line_ending = _split_line_ending(line)
+		stripped = body.lstrip()
+		indent = body[: len(body) - len(stripped)]
+		for key in ("Path", "Path_Rom"):
+			prefix = f"{key}="
+			if stripped.startswith(prefix):
+				source_path = stripped[len(prefix) :].strip()
+				filename = source_path.rstrip("\\/").replace("/", "\\").rsplit("\\", 1)[-1]
+				if filename:
+					rewritten_lines.append(f"{indent}{key}={short_eloquence_dir}\\{filename}{line_ending}")
+					break
+		else:
+			rewritten_lines.append(line.replace("C:\\dummy\\", short_eloquence_dir + "\\"))
+	return "".join(rewritten_lines)
+
+
+def _write_text_atomic(path: str, content: str) -> None:
+	directory = os.path.dirname(path)
+	fd, temp_path = tempfile.mkstemp(
+		prefix=f".{os.path.basename(path)}.",
+		suffix=".tmp",
+		dir=directory,
+		text=True,
+	)
+	try:
+		with os.fdopen(fd, "w", encoding="utf-8", newline="") as temp_file:
+			temp_file.write(content)
+		os.replace(temp_path, path)
+	except Exception:
+		try:
+			os.unlink(temp_path)
+		except OSError:
+			pass
+		raise
 
 
 # Constants mirrored from the old in-process implementation.
@@ -230,18 +284,13 @@ class EloquenceRuntime:
 		ini_path = self._config.eci_path[:-3] + "ini"
 		eloquence_dir = os.path.dirname(self._config.eci_path)
 
-		# Read the entire INI file
+		# Ensure ECI.INI points at this install without risking a truncated file
+		# if the secure-screen host is interrupted during startup.
 		with open(ini_path, "r", encoding="utf-8") as f:
 			ini_content = f.read()
-
-		# Replace C:\dummy\ with the actual eloquence directory
-		# Use short path to avoid encoding issues with legacy DLLs and Python's default encoding
-		short_eloquence_dir = get_short_path(eloquence_dir)
-		updated_content = ini_content.replace("C:\\dummy\\", short_eloquence_dir + "\\")
-
-		# Write the updated content back
-		with open(ini_path, "w", encoding="utf-8") as f:
-			f.write(updated_content)
+		updated_content = _rewrite_eci_ini_paths(ini_content, eloquence_dir)
+		if updated_content != ini_content:
+			_write_text_atomic(ini_path, updated_content)
 		self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
 		self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
 		self._dll.eciRegisterCallback.restype = None
@@ -294,7 +343,9 @@ class EloquenceRuntime:
 					path = os.path.join(dictionary_dir, candidate)
 					if os.path.exists(path):
 						# LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
-						self._dll.eciLoadDict(self._handle, self._dictionary_handle, index, path.encode("mbcs"))
+						self._dll.eciLoadDict(
+							self._handle, self._dictionary_handle, index, path.encode("mbcs")
+						)
 						break
 			self._loaded_dictionary_languages.add(language_code)
 		self._dll.eciSetDict(self._handle, self._dictionary_handle)
