@@ -66,6 +66,12 @@ if not host_exe.exists():
 
 manifest = env.NVDAManifest(env.File(str(addonDir / "manifest.ini")), "manifest.ini.tpl")
 env.Depends(manifest, "buildVars.py")
+# addon_version comes from `git describe` at buildVars import time. That value is
+# not captured by the content signatures of manifest.ini.tpl or buildVars.py, so
+# without an explicit dependency SCons caches a stale version in manifest.ini
+# while the .nvda-addon filename (recomputed each run) moves ahead. Depend on the
+# version string itself so the manifest regenerates whenever HEAD moves.
+env.Depends(manifest, env.Value(buildVars.addon_info["addon_version"]))
 
 # --- Build addon bundle ----------------------------------------------------
 
