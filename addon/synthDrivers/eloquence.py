@@ -65,7 +65,6 @@ from synthDriverHandler import (
 	synthIndexReached,
 	synthDoneSpeaking,
 )
-from . import _secure_screen
 from . import _eloquence
 from . import _text_preprocessing
 from collections import OrderedDict
@@ -75,54 +74,6 @@ import addonHandler
 addonHandler.initTranslation()
 
 log = logging.getLogger(__name__)
-
-
-SEE_MASK_NOCLOSEPROCESS = 0x00000040
-INFINITE = 0xFFFFFFFF
-ERROR_CANCELLED = 1223
-SE_ERR_ACCESSDENIED = 5
-
-
-class _ShellExecuteInfo(ctypes.Structure):
-	_fields_ = [
-		("cbSize", ctypes.wintypes.DWORD),
-		("fMask", ctypes.wintypes.ULONG),
-		("hwnd", ctypes.wintypes.HWND),
-		("lpVerb", ctypes.wintypes.LPCWSTR),
-		("lpFile", ctypes.wintypes.LPCWSTR),
-		("lpParameters", ctypes.wintypes.LPCWSTR),
-		("lpDirectory", ctypes.wintypes.LPCWSTR),
-		("nShow", ctypes.c_int),
-		("hInstApp", ctypes.wintypes.HINSTANCE),
-		("lpIDList", ctypes.c_void_p),
-		("lpClass", ctypes.wintypes.LPCWSTR),
-		("hkeyClass", ctypes.wintypes.HKEY),
-		("dwHotKey", ctypes.wintypes.DWORD),
-		("hIcon", ctypes.wintypes.HANDLE),
-		("hProcess", ctypes.wintypes.HANDLE),
-	]
-
-
-def _run_elevated_command(command_params):
-	execute_info = _ShellExecuteInfo()
-	execute_info.cbSize = ctypes.sizeof(execute_info)
-	execute_info.fMask = SEE_MASK_NOCLOSEPROCESS
-	execute_info.lpVerb = "runas"
-	execute_info.lpFile = "cmd.exe"
-	execute_info.lpParameters = command_params
-	execute_info.nShow = 0
-
-	if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(execute_info)):
-		return False, ctypes.windll.kernel32.GetLastError()
-
-	try:
-		ctypes.windll.kernel32.WaitForSingleObject(execute_info.hProcess, INFINITE)
-		exit_code = ctypes.wintypes.DWORD()
-		ctypes.windll.kernel32.GetExitCodeProcess(execute_info.hProcess, ctypes.byref(exit_code))
-		return exit_code.value == 0, exit_code.value
-	finally:
-		if execute_info.hProcess:
-			ctypes.windll.kernel32.CloseHandle(execute_info.hProcess)
 
 
 minRate = 40
@@ -224,9 +175,8 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			# Panel creation failed, but don't crash - synth will still work
 
 	def onCopyHelper(self, evt):
-		"""Copies secure-screen runtime files with UAC elevation support and definitive feedback."""
-		source_synth_dir = os.path.abspath(os.path.dirname(__file__))
-		source_addon_dir = os.path.abspath(os.path.join(source_synth_dir, os.pardir))
+		"""Copies eloquence_host32.exe with UAC elevation support and definitive feedback."""
+		source_file = os.path.normpath(os.path.join(os.path.dirname(__file__), "eloquence_host32.exe"))
 		prog_files = os.environ.get("ProgramFiles", "C:\\Program Files")
 		target_addon_dir = os.path.normpath(
 			os.path.join(prog_files, "NVDA", "systemConfig", "addons", "Eloquence")
@@ -245,56 +195,39 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			)
 			return
 
-		source_version = _secure_screen.read_manifest_version(source_addon_dir)
-		target_version = _secure_screen.read_manifest_version(target_addon_dir)
-		if not source_version or not target_version or source_version != target_version:
-			wx.MessageBox(
-				_(
-					# Translators: Text of a message dialog when copying helper files to system config
-					"The Eloquence add-on in NVDA's system configuration is not the same version as your current add-on.\n\n"
-					"Current add-on: {source_version}\n"
-					"System configuration: {target_version}\n\n"
-					"Go to NVDA Settings > General, run 'Use currently saved settings during sign-in', "
-					"select Eloquence, then return here and run this copy again."
-				).format(
-					source_version=source_version or _("unknown"),
-					target_version=target_version or _("unknown"),
-				),
-				# Translators: Title of a message dialog when copying helper files to system config
-				_("System Configuration Copy Is Outdated"),
-				wx.OK | wx.ICON_WARNING,
-			)
-			return
+		dest_dir = os.path.normpath(os.path.join(target_addon_dir, "synthDrivers"))
+		dest_file = os.path.normpath(os.path.join(dest_dir, "eloquence_host32.exe"))
 
-		try:
-			copy_plan = _secure_screen.build_copy_plan(source_synth_dir, target_addon_dir)
-		except FileNotFoundError as e:
+		if not os.path.exists(source_file):
 			wx.MessageBox(
 				# Translators: Text of a message dialog when copying the helper to system config
-				_("Source file not found at:\n{source_file}").format(source_file=str(e)),
+				_("Source file not found at:\n{source_file}").format(source_file=source_file),
 				# Translators: Title of a message dialog when copying the helper to system config
 				_("Error"),
 				wx.OK | wx.ICON_ERROR,
 			)
 			return
 
-		try:
-			success, ret = _run_elevated_command(copy_plan.command)
+		# Prepare elevated command: ensure subdirectory exists and copy the helper
+		cmd_params = f'/c mkdir "{dest_dir}" 2>nul & copy /y "{source_file}" "{dest_file}"'
 
-			if success:
+		try:
+			# Triggering UAC Elevation using ShellExecuteW's "runas" verb
+			ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", cmd_params, None, 0)
+
+			if ret > 32:
 				# Play Windows Asterisk sound for confirmation of successful launch
 				winsound.MessageBeep(winsound.MB_ICONASTERISK)
 				wx.MessageBox(
 					_(
 						# Translators: text of a message dialog when copying the helper to system config
-						"Successfully copied Eloquence secure-screen files to systemConfig!\n\n"
-						"Eloquence should now load normally on logon screen, start-up, and other secure screens."
+						"Successfully copied eloquence_host32.exe to systemConfig!\n\nEloquence should now load normally on logon screen, start-up, and other secure screens."
 					),
 					# Translators: Title of a message dialog when copying the helper to system config
 					_("Success"),
 					wx.OK | wx.ICON_INFORMATION,
 				)
-			elif ret in (SE_ERR_ACCESSDENIED, ERROR_CANCELLED):
+			elif ret == 5:
 				# SE_ERR_ACCESSDENIED: Elevation prompt was declined
 				wx.MessageBox(
 					# Translators: Text of a message dialog when copying the helper to system config
