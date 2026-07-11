@@ -48,6 +48,7 @@ class AudioWorker(threading.Thread):
 		self._player_lock = threading.RLock()
 
 	def run(self) -> None:
+		pending_audio: Optional[AudioChunk] = None
 		while self._running:
 			try:
 				chunk = self._queue.get(timeout=0.1)
@@ -56,47 +57,78 @@ class AudioWorker(threading.Thread):
 			if chunk is None:
 				break
 			data, index, is_final, seq = chunk
+			if pending_audio and pending_audio[3] < self._client._sequence:
+				pending_audio = None
 			if seq < self._client._sequence:
 				self._queue.task_done()
 				continue
 
-			# --- New logic (EARCONS patch) ---
-			if not data:
-				if not self._stopping:
-					if index is not None:
-						self._invoke_index_callback(index)
-					if is_final:
-						self._schedule_idle()
-				self._queue.task_done()
-				continue
-			# ------------------------------------
-
-			on_done = None
-			if index is not None:
-
-				def _callback(i=index):
-					self._invoke_index_callback(i)
-
-				on_done = _callback
-
-			wrapped_on_done = self._make_on_done(on_done, is_final)
-
-			# Early exit if stopping - avoids unnecessary lock acquisition
-			if self._stopping:
+			if data:
+				# Hold one real Audio Chunk so a following index-only event can use
+				# WavePlayer's completion callback without feeding a synthetic sample.
+				if pending_audio:
+					self._feed_audio(*pending_audio[:3])
+				pending_audio = chunk
 				self._queue.task_done()
 				continue
 
-			# Feed directly - blocks if buffer is full
-			try:
-				with self._player_lock:
-					if not self._stopping:
-						if self._player:
-							self._player.feed(data, onDone=wrapped_on_done)
-			except FileNotFoundError:
-				LOGGER.warning("Sound device not found during feed")
-			except Exception:
-				LOGGER.exception("WavePlayer feed failed")
+			# The Eloquence Host Process reports Speech Indexes as index-only
+			# events. Attach the notification to the preceding real Audio Chunk so
+			# NVDA receives it only after that audio finishes playing.
+			if pending_audio:
+				pending_data, pending_index, pending_final, _pending_seq = pending_audio
+				self._feed_audio(
+					pending_data,
+					index if index is not None else pending_index,
+					pending_final,
+				)
+				pending_audio = None
+				index = None
+			if not self._stopping:
+				if index is not None:
+					self._sync_and_invoke_index(index)
+				if is_final:
+					self._schedule_idle()
 			self._queue.task_done()
+
+	def _feed_audio(self, data: bytes, index: Optional[int], is_final: bool) -> None:
+		"""Feed a real Audio Chunk and attach its Speech Progress Notification."""
+
+		on_done = None
+		if index is not None:
+
+			def _callback(i=index):
+				self._invoke_index_callback(i)
+
+			on_done = _callback
+
+		wrapped_on_done = self._make_on_done(on_done, is_final) if on_done or is_final else None
+
+		# Early exit if stopping - avoids unnecessary lock acquisition
+		if self._stopping:
+			return
+
+		# Feed directly - blocks if buffer is full
+		try:
+			with self._player_lock:
+				if not self._stopping:
+					if self._player:
+						self._player.feed(data, onDone=wrapped_on_done)
+		except FileNotFoundError:
+			LOGGER.warning("Sound device not found during feed")
+		except Exception:
+			LOGGER.exception("WavePlayer feed failed")
+
+	def _sync_and_invoke_index(self, index: int) -> None:
+		"""Report a Speech Index that has no real Audio Chunk to carry it."""
+		try:
+			with self._player_lock:
+				if not self._stopping and self._player:
+					self._player.sync()
+		except Exception:
+			LOGGER.exception("WavePlayer sync failed")
+		if not self._stopping:
+			self._invoke_index_callback(index)
 
 	def stop(self) -> None:
 		self._stopping = True
