@@ -24,23 +24,26 @@ _PHRASE_FINAL_EM_DASH = re.compile(r"\u2014(?=[\"'\u2019\u201d)\]}]*\s*$)")
 # Crash prevention dictionaries
 # ---------------------------------------------------------------------------
 # Each dictionary maps a compiled regex to a replacement string.  _resub()
-# applies them in insertion order, which matters for the date parser pair.
+# applies them in insertion order.
 
 english_fixes = {
 	re.compile(r"(\w+)\.([a-zA-Z]+)"): r"\1 dot \2",
 	re.compile(r"([a-zA-Z0-9_]+)@(\w+)"): r"\1 at \2",
 	# Mc prefix split crash (covers McName and McDONALD)
 	re.compile(r"\b(Mc)\s+([A-Z][a-z]|[A-Z][A-Z]+)"): r"\1\2",
-	# Date parser bug: "03 Marble" misread as "march ble" (abbreviated first)
+	# Date parser bug: "03 Marble" misread as "march ble".  The second space
+	# stops the engine's date parser fusing the number with the month-prefixed
+	# word.  Genuine full month names are excluded via lookahead so real dates
+	# ("14 March") still read as dates.  No pattern may ever *collapse* a
+	# double space: NVDA separates speech chunks (e.g. a "row 14" table
+	# announcement and a "March" cell) with two spaces, and removing that
+	# separator makes the engine read the chunks as one date.
 	re.compile(
-		r"\b(\d+) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
+		r"\b(\d+) (?!(?:January|February|March|April|May|June|July|August"
+		r"|September|October|November|December)\b)"
+		r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
 		r"([a-z]+)"
 	): r"\1  \2\3",
-	# Undo double-space for actual full month names
-	re.compile(
-		r"\b(\d+)  (January|February|March|April|May|June|July|August"
-		r"|September|October|November|December)\b"
-	): r"\1 \2",
 	# caesure / cæsure crash
 	re.compile(r"c(ae|\xe6)sur(e)?", re.I): r"seizur",
 	# h' + r/v + e crash
