@@ -205,6 +205,7 @@ class EloquenceRuntime:
 		self._voice_params: Dict[int, int] = {}
 		self._speaking = False
 		self._saw_final_index = False
+		self._pending_indexes: list[int] = []
 
 	# ------------------------------------------------------------------
 	# Communication helpers
@@ -308,6 +309,8 @@ class EloquenceRuntime:
 	def insert_index(self, index: int) -> None:
 		# LOGGER.debug("Inserting index %s", index)
 		self._dll.eciInsertIndex(self._handle, index)
+		if index != FINAL_INDEX:
+			self._pending_indexes.append(index)
 
 	def synthesize(self) -> None:
 		# LOGGER.debug("Starting synthesis")
@@ -325,6 +328,7 @@ class EloquenceRuntime:
 			# If no final index was delivered, still emit a final marker so NVDA
 			# receives synthDoneSpeaking (e.g. when there is no text to speak).
 			if not self._saw_final_index:
+				self._report_latest_pending_index()
 				self._send_event("audio", data=b"", index=None, final=True)
 
 	def stop(self) -> None:
@@ -332,6 +336,7 @@ class EloquenceRuntime:
 		self._dll.eciStop(self._handle)
 		self._audio_buffer.seek(0)
 		self._audio_buffer.truncate(0)
+		self._pending_indexes.clear()
 		self._speaking = False
 		self._send_event("stopped")
 
@@ -392,12 +397,41 @@ class EloquenceRuntime:
 			# Index callback
 			is_final = length == FINAL_INDEX
 			index_value = length if not is_final else None
+			if is_final:
+				self._report_latest_pending_index()
+			else:
+				self._discard_pending_indexes_through(length)
 			# Send empty chunk with index marker
 			self._send_event("audio", data=b"", index=index_value, final=is_final)
 			if is_final:
 				self._saw_final_index = True
 				self._speaking = False
 		return 1
+
+	def _discard_pending_indexes_through(self, index: int) -> None:
+		"""Forget indexes at or before an index reported by the engine.
+
+		NVDA treats an observed later Speech Index as evidence that earlier
+		indexes with no intervening audio were also reached.  Mirroring that rule
+		here prevents an older skipped index from being reported out of order at
+		final completion.
+		"""
+		try:
+			position = self._pending_indexes.index(index)
+		except ValueError:
+			return
+		del self._pending_indexes[: position + 1]
+
+	def _report_latest_pending_index(self) -> None:
+		"""Report the latest index if the engine silently skipped its callback."""
+		if not self._pending_indexes:
+			return
+		index = self._pending_indexes[-1]
+		self._pending_indexes.clear()
+		# Host logging intentionally records errors only.  Treat this protocol
+		# recovery as an error so a silent engine failure leaves diagnostics.
+		LOGGER.error("Eloquence skipped index callback %s; reporting it at completion", index)
+		self._send_event("audio", data=b"", index=index, final=False)
 
 	def _flush_audio(self, index: Optional[int] = None, force: bool = False, final: bool = False) -> None:
 		if self._audio_buffer.tell() == 0:

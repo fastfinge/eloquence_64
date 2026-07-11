@@ -12,6 +12,14 @@ import unicodedata
 
 from ._script_conversion import convert_traditional_to_simplified
 
+
+# Eloquence can finish synthesis without delivering a following Speech Index
+# when an em dash is the final punctuation in a text block.  A comma preserves
+# the intended phrase break without exposing the legacy parser to U+2014 in
+# this position.  Include common closing quotes/brackets in the lookahead
+# because NVDA's symbol processing may preserve or remove them.
+_PHRASE_FINAL_EM_DASH = re.compile(r"\u2014(?=[\"'\u2019\u201d)\]}]*\s*$)")
+
 # ---------------------------------------------------------------------------
 # Crash prevention dictionaries
 # ---------------------------------------------------------------------------
@@ -195,6 +203,7 @@ def _resub(dct, s):
 # ---------------------------------------------------------------------------
 def preprocess(text, voice_id):
 	"""Apply crash prevention fixes and text normalization for *voice_id*."""
+	text = _PHRASE_FINAL_EM_DASH.sub(",", text)
 	# Capital sharp s (ẞ, U+1E9E) is not in legacy Windows code pages and
 	# would be replaced with "?" by MBCS encoding.  Fall back to lowercase ß
 	# (U+00DF), which all Latin code pages recognise.  Applied globally

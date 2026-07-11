@@ -25,13 +25,24 @@ class FakeDll:
 	def eciSetParam(self, handle, param_id, value):
 		self.calls.append(("setParam", handle, param_id, value))
 
+	def eciInsertIndex(self, handle, index):
+		self.calls.append(("insertIndex", handle, index))
+
 	def eciGetVoiceParam(self, handle, voice, param_id):
 		return param_id
 
 
-def make_runtime(data_directory, language_code="enu"):
+class RecordingConnection:
+	def __init__(self):
+		self.messages = []
+
+	def send(self, message):
+		self.messages.append(message)
+
+
+def make_runtime(data_directory, language_code="enu", conn=None):
 	runtime = host.EloquenceRuntime(
-		conn=None,
+		conn=conn,
 		config=host.HostConfig(
 			eci_path="",
 			data_directory=data_directory,
@@ -44,6 +55,59 @@ def make_runtime(data_directory, language_code="enu"):
 	runtime._dll = FakeDll()
 	runtime._handle = "eci"
 	return runtime
+
+
+class SpeechIndexTests(unittest.TestCase):
+	def test_final_index_reports_latest_engine_skipped_index(self):
+		connection = RecordingConnection()
+		runtime = make_runtime("", conn=connection)
+		runtime.insert_index(41)
+		runtime.insert_index(42)
+		runtime._speaking = True
+
+		runtime._on_callback(None, 2, host.FINAL_INDEX, None)
+
+		self.assertEqual(
+			connection.messages,
+			[
+				{
+					"type": "event",
+					"event": "audio",
+					"payload": {"data": b"", "index": 42, "final": False},
+				},
+				{
+					"type": "event",
+					"event": "audio",
+					"payload": {"data": b"", "index": None, "final": True},
+				},
+			],
+		)
+
+	def test_reached_index_clears_it_and_any_skipped_predecessors(self):
+		connection = RecordingConnection()
+		runtime = make_runtime("", conn=connection)
+		runtime.insert_index(41)
+		runtime.insert_index(42)
+		runtime._speaking = True
+
+		runtime._on_callback(None, 2, 42, None)
+		runtime._on_callback(None, 2, host.FINAL_INDEX, None)
+
+		self.assertEqual(
+			connection.messages,
+			[
+				{
+					"type": "event",
+					"event": "audio",
+					"payload": {"data": b"", "index": 42, "final": False},
+				},
+				{
+					"type": "event",
+					"event": "audio",
+					"payload": {"data": b"", "index": None, "final": True},
+				},
+			],
+		)
 
 
 class DictionaryLoadingTests(unittest.TestCase):

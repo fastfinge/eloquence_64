@@ -4,6 +4,9 @@ from addon.synthDrivers._text_preprocessing import preprocess
 
 
 class TextPreprocessingTests(unittest.TestCase):
+	def test_phrase_final_em_dash_is_rewritten_for_legacy_engine(self):
+		self.assertEqual(preprocess("You don't have to—  ", 65536), "You don't have to,  ")
+
 	def test_chs_preprocessing_rewrites_known_traditional_characters(self):
 		self.assertEqual(preprocess("選設檢", 393216), "选设检")
 
