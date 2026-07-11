@@ -28,6 +28,45 @@ class TextPreprocessingTests(unittest.TestCase):
 		# ẞ (U+1E9E) should become ß (U+00DF), not "?"
 		self.assertEqual(preprocess("STRASSE \u1e9e", 65536), "STRASSE \u00df")
 
+	def test_month_prefix_words_are_split_from_preceding_numbers(self):
+		# ECI date parser bug: "03 Marble" would read as "March thirdble".
+		# The extra space stops the engine fusing the number and the word.
+		self.assertEqual(preprocess("03 Marble", 65536), "03  Marble")
+
+	def test_genuine_dates_keep_their_single_space(self):
+		# A real date inside one speech chunk should still reach the engine
+		# untouched so it reads as a date.
+		self.assertEqual(
+			preprocess("I arrived on 14 March 2020", 65536),
+			"I arrived on 14 March 2020",
+		)
+
+	def test_nvda_chunk_separator_before_month_is_preserved(self):
+		# NVDA joins separate speech chunks (e.g. the "row 14" announcement
+		# and a "March" table cell) with CHUNK_SEPARATOR, two spaces.  The
+		# double space stops the ECI date parser fusing the chunks; removing
+		# it makes "row 14  March" read as "row March 14".  Preprocessing
+		# must never collapse it.
+		for month in (
+			"January",
+			"February",
+			"March",
+			"April",
+			"May",
+			"June",
+			"July",
+			"August",
+			"September",
+			"October",
+			"November",
+			"December",
+		):
+			with self.subTest(month=month):
+				self.assertEqual(
+					preprocess(f"row 14  {month}  ", 65536),
+					f"row 14  {month}  ",
+				)
+
 
 if __name__ == "__main__":
 	unittest.main()
