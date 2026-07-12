@@ -77,9 +77,8 @@ def break_fragment(time_ms: int, options: BuildOptions) -> bytes:
 		factor = _BREAK_FACTORS[keys[0]]
 	elif options.rate >= keys[-1]:
 		factor = _BREAK_FACTORS[keys[-1]]
-	elif options.rate in keys:
-		factor = _BREAK_FACTORS[keys[0]]
 	else:
+		# Interpolation lands exactly on the table value when the rate is a key.
 		left_index = [index for index, rate in enumerate(keys) if rate < options.rate][-1]
 		right_index = left_index + 1
 		left_rate = keys[left_index]
