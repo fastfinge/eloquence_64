@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from . import _eloquence_ipc as _ipc
+from . import _eloquence_job as _job
 
 import config
 import nvwave
@@ -186,6 +187,8 @@ class HostProcess:
 class EloquenceHostClient:
 	def __init__(self) -> None:
 		self._host: Optional[HostProcess] = None
+		# Outlives every Eloquence Host Process we spawn; closed only when NVDA exits.
+		self._job: Optional[_job.HostJob] = None
 		self._pending: Dict[int, threading.Event] = {}
 		self._responses: Dict[int, Dict[str, Any]] = {}
 		self._receiver: Optional[threading.Thread] = None
@@ -221,6 +224,7 @@ class EloquenceHostClient:
 		)
 		LOGGER.info("Launching Eloquence host: %s", cmd)
 		proc = subprocess.Popen(cmd, cwd=addon_dir)
+		self._adopt_into_job(proc)
 		try:
 			conn = _ipc.accept_authenticated(listener, authkey)
 		except (TimeoutError, OSError) as exc:
@@ -244,6 +248,28 @@ class EloquenceHostClient:
 		self._host = HostProcess(process=proc, connection=conn, listener=listener)
 		self._receiver = threading.Thread(target=self._receiver_loop, daemon=True)
 		self._receiver.start()
+
+	def _adopt_into_job(self, proc: subprocess.Popen) -> None:
+		"""Put a freshly spawned Eloquence Host Process into the kill-on-close Job Object.
+
+		Called before the Host Channel is accepted so that an Eloquence Host Process
+		that never connects is covered too.  Purely a backstop: shutdown() still drives the
+		cooperative exit, and the job only decides what happens when NVDA dies
+		without getting to run it.
+		"""
+		if self._job is None:
+			self._job = _job.HostJob.create()
+		if self._job is None:
+			return
+		try:
+			handle = int(proc._handle)
+		except Exception:
+			LOGGER.warning(
+				"Eloquence Host Process exposes no handle; skipping Job Object",
+				exc_info=True,
+			)
+			return
+		self._job.assign(handle)
 
 	def _resolve_host_executable(self, addon_dir: str) -> Sequence[str]:
 		override = os.environ.get("ELOQUENCE_HOST_COMMAND")
