@@ -25,6 +25,9 @@ LOGGER = logging.getLogger(__name__)
 HOST_EXECUTABLE = "eloquence_host32.exe"
 HOST_SCRIPT = "host_eloquence32.py"
 AUTH_KEY_BYTES = 16
+# Seconds to let the host exit on its own before we terminate it. A onefile
+# PyInstaller build only removes its _MEI temp directory on a clean exit.
+HOST_EXIT_TIMEOUT = 3.0
 
 
 # Audio handling -----------------------------------------------------------------
@@ -421,11 +424,25 @@ class EloquenceHostClient:
 			self.send_command("delete")
 		except Exception:
 			LOGGER.exception("Failed to delete host cleanly")
+		# Let the host exit on its own before touching the socket. Closing the
+		# connection first resets it underneath the host, which turns every
+		# in-flight send into a ConnectionResetError; those escape the host's
+		# serve loop as an unhandled exception and, in a --noconsole build,
+		# surface as an error dialog.
+		exited = False
+		try:
+			self._host.process.wait(timeout=HOST_EXIT_TIMEOUT)
+			exited = True
+		except Exception:
+			LOGGER.warning(
+				"Eloquence host did not exit within %ss; terminating",
+				HOST_EXIT_TIMEOUT,
+			)
 		# Wait for receiver thread to finish (it will get EOFError and exit)
 		if self._receiver:
 			self._receiver.join(timeout=2)
 			self._receiver = None
-		# Now close connections and terminate process
+		# Now close connections, and terminate the process only if it is still up.
 		try:
 			self._host.connection.close()
 		except Exception:
@@ -434,15 +451,19 @@ class EloquenceHostClient:
 			self._host.listener.close()
 		except Exception:
 			pass
-		try:
-			self._host.process.terminate()
-			self._host.process.wait(timeout=2)
-		except Exception:
-			LOGGER.exception("Failed to terminate host process")
+		if not exited:
+			# terminate() is TerminateProcess on Windows and cannot be blocked, so
+			# the bootloader never gets to clean up its _MEI directory. Only
+			# reached when the graceful wait above timed out.
 			try:
-				self._host.process.kill()
+				self._host.process.terminate()
+				self._host.process.wait(timeout=2)
 			except Exception:
-				pass
+				LOGGER.exception("Failed to terminate host process")
+				try:
+					self._host.process.kill()
+				except Exception:
+					pass
 		self._host = None
 
 
