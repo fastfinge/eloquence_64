@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import logging
 import os
-import socket
 
 import queue
 import shlex
@@ -25,7 +24,8 @@ LOGGER = logging.getLogger(__name__)
 
 HOST_EXECUTABLE = "eloquence_host32.exe"
 HOST_SCRIPT = "host_eloquence32.py"
-AUTH_KEY_BYTES = 16
+# How long to wait for the Eloquence Host Process to open the Host Channel.
+HOST_CONNECT_TIMEOUT = 10.0
 # Seconds to let the host exit on its own before we terminate it. A onefile
 # PyInstaller build only removes its _MEI temp directory on a clean exit.
 HOST_EXIT_TIMEOUT = 3.0
@@ -181,7 +181,7 @@ AudioChunk = Tuple[bytes, Optional[int], bool, int]
 class HostProcess:
 	process: subprocess.Popen
 	connection: Any
-	listener: socket.socket
+	listener: _ipc.PipeListener
 
 
 class EloquenceHostClient:
@@ -208,26 +208,24 @@ class EloquenceHostClient:
 		if self._host:
 			return
 		addon_dir = os.path.abspath(os.path.dirname(__file__))
-		authkey = os.urandom(AUTH_KEY_BYTES)
 		listener = _ipc.create_listener()
-		port = listener.getsockname()[1]
 		cmd = list(self._resolve_host_executable(addon_dir))
 		cmd.extend(
 			[
-				"--address",
-				f"127.0.0.1:{port}",
-				"--authkey",
-				authkey.hex(),
+				"--pipe",
+				listener.name,
 				"--log-dir",
 				addon_dir,
 			]
 		)
 		LOGGER.info("Launching Eloquence host: %s", cmd)
 		proc = subprocess.Popen(cmd, cwd=addon_dir)
+		# Must precede accept(): the Host Channel identifies its peer by asking
+		# whether that process is in this job.
 		self._adopt_into_job(proc)
 		try:
-			conn = _ipc.accept_authenticated(listener, authkey)
-		except (TimeoutError, OSError) as exc:
+			conn = listener.accept(self._job, HOST_CONNECT_TIMEOUT)
+		except (_ipc.HostChannelError, OSError) as exc:
 			LOGGER.error("Eloquence host failed to connect: %s", exc)
 			exit_code = proc.poll()
 			if exit_code is not None:
@@ -323,16 +321,9 @@ class EloquenceHostClient:
 		while True:
 			try:
 				message = connection.recv()
-			except socket.timeout:
-				if self._host and self._host.process.poll() is not None:
-					LOGGER.error("Host process exited (code %s)", self._host.process.returncode)
-					for msg_id, event in list(self._pending.items()):
-						self._responses[msg_id] = {"error": "hostExited"}
-						event.set()
-					self._pending.clear()
-					break
-				continue  # Host still alive, just busy
 			except (EOFError, ConnectionAbortedError, OSError):
+				# A dead Eloquence Host Process breaks the pipe immediately, so
+				# this covers the exit the socket transport needed a poll to spot.
 				LOGGER.info("Host connection closed")
 				for msg_id, event in list(self._pending.items()):
 					self._responses[msg_id] = {"error": "connectionClosed"}
@@ -543,6 +534,7 @@ langs = {
 	"jpn": (524288, "Japanese"),  # 0x00080000
 	"kor": (655360, "Korean"),
 }  # 0x000A0000
+
 
 def _ascii_safe_dir(directory):
 	"""Return *directory* as an ASCII path the ANSI ECI engine can open, or ``None``.
