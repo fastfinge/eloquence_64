@@ -156,12 +156,17 @@ def get_dictionary_candidates(language_code: str) -> tuple[tuple[str, ...], tupl
 
 
 def configure_logging(log_dir: Optional[str]) -> None:
-	"""Initialise logging for the helper."""
+	"""Initialise logging for the helper.
+
+	The log file is truncated at startup so each host invocation starts fresh
+	and old error output does not accumulate across NVDA restarts.  On a clean
+	exit with no errors the file stays at zero bytes.
+	"""
 	log_file = None
 	if log_dir:
 		log_file = os.path.join(log_dir, "eloquence-host.log")
 		try:
-			with open(log_file, "a"):
+			with open(log_file, "w"):
 				pass
 		except OSError:
 			log_file = None
@@ -206,15 +211,20 @@ class EloquenceRuntime:
 		self._speaking = False
 		self._saw_final_index = False
 		self._pending_indexes: list[int] = []
+		self._send_disabled = False
 
 	# ------------------------------------------------------------------
 	# Communication helpers
 	def _send_event(self, event: str, **payload: object) -> None:
+		if self._send_disabled:
+			return
 		# LOGGER.debug("Sending event %s", event)
 		try:
 			self._conn.send({"type": "event", "event": event, "payload": payload})
 		except Exception:
-			LOGGER.exception("Failed to send event %s", event)
+			if not self._send_disabled:
+				self._send_disabled = True
+				LOGGER.error("Failed to send event %s; further sends disabled", event)
 
 	def _send_response(self, msg_id: int, **payload: object) -> None:
 		# LOGGER.debug("Sending response for %s", msg_id)
@@ -295,7 +305,9 @@ class EloquenceRuntime:
 					path = os.path.join(dictionary_dir, candidate)
 					if os.path.exists(path):
 						# LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
-						self._dll.eciLoadDict(self._handle, self._dictionary_handle, index, path.encode("mbcs"))
+						self._dll.eciLoadDict(
+							self._handle, self._dictionary_handle, index, path.encode("mbcs")
+						)
 						break
 			self._loaded_dictionary_languages.add(language_code)
 		self._dll.eciSetDict(self._handle, self._dictionary_handle)
@@ -481,7 +493,10 @@ class HostController:
 			handler = self._handlers.get(command)
 			if handler is None:
 				LOGGER.error("Unknown command %s", command)
-				self._conn.send({"type": "response", "id": msg_id, "error": "unknownCommand"})
+				try:
+					self._conn.send({"type": "response", "id": msg_id, "error": "unknownCommand"})
+				except Exception:
+					LOGGER.error("Failed to send error response for unknown command %s", command)
 				continue
 			try:
 				payload = handler(**message.get("payload", {}))
@@ -491,7 +506,10 @@ class HostController:
 					break
 			except Exception as exc:
 				LOGGER.exception("Command %s failed", command)
-				self._conn.send({"type": "response", "id": msg_id, "error": str(exc)})
+				try:
+					self._conn.send({"type": "response", "id": msg_id, "error": str(exc)})
+				except Exception:
+					LOGGER.error("Failed to send error response for command %s", command)
 
 	# ------------------------------------------------------------------
 	# Command handlers
