@@ -792,6 +792,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	def terminate(self):
 		_eloquence.close_audio()
+		# Shut the 32-bit host process down. Without this the host is never asked
+		# to exit, so its onefile bootloader never removes the _MEI directory it
+		# extracted, and its in-flight sends die on a reset socket rather than a
+		# closed one. Wrapped so a shutdown failure cannot block switching away
+		# from this synth.
+		try:
+			_eloquence.terminate()
+		except Exception:
+			log.exception("Eloquence host shutdown failed")
 		# Safe settings panel removal - won't crash if it was never registered
 		try:
 			if hasattr(gui.settingsDialogs, "NVDASettingsDialog"):
