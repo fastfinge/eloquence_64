@@ -49,14 +49,11 @@ except ImportError:
 			self.label = label
 
 
-punctuation = ",.?:;)(?!"
-punctuation = [x for x in punctuation]
 from ctypes import *
 import ctypes.wintypes
 import synthDriverHandler
 import os
 import config
-import re
 import logging
 import core
 import globalVars
@@ -66,7 +63,7 @@ from synthDriverHandler import (
 	synthDoneSpeaking,
 )
 from . import _eloquence
-from . import _text_preprocessing
+from . import _eloquence_text
 from collections import OrderedDict
 import unicodedata
 import addonHandler
@@ -78,8 +75,6 @@ log = logging.getLogger(__name__)
 
 minRate = 40
 maxRate = 150
-pause_re = re.compile(r"([a-zA-Z0-9]|\s)([,.:;?!)])(\2*?)(\s|[\\/]|$|$)")
-time_re = re.compile(r"(\d):(\d+):(\d+)")
 VOICE_BCP47 = {
 	"enu": "en-US",
 	"eng": "en-GB",
@@ -833,11 +828,22 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			result.append(current_string)
 		return result
 
+	def _build_options(self):
+		return _eloquence_text.BuildOptions(
+			volume=self.getVParam(_eloquence.vlm),
+			rate=self.rate,
+			pause_mode=self._pause_mode,
+			backquote_tags=self._backquoteVoiceTags,
+			abbreviation_dict=self._ABRDICT,
+			phrase_prediction=self._phrasePrediction,
+		)
+
 	def speak(self, speechSequence):
 		last = None
 		outlist = []
 		pending_indexes = []
 		queued_speech = False
+		options = self._build_options()
 		sequence_voice = getattr(self, "_defaultVoice", str(_eloquence.params.get(9, 65536)))
 		last_queued_engine_voice = getattr(self, "_lastEngineVoice", None)
 
@@ -859,7 +865,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		for item in speechSequence:
 			if isinstance(item, str):
 				s = str(item)
-				s = self.xspeakText(s, voice_id=sequence_voice)
+				s = _eloquence_text.build(s, voice_id=sequence_voice, options=options)
 				outlist.append((_eloquence.speak, (s,)))
 				last = s
 				queued_speech = True
@@ -867,35 +873,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 				pending_indexes.append(item.index)
 				outlist.append((_eloquence.index, (item.index,)))
 			elif isinstance(item, BreakCommand):
-				# Eloquence doesn't respect delay time in milliseconds.
-				# Therefor we need to adjust waiting time depending on curernt speech rate
-				# The following table of adjustments has been measured empirically
-				# Then we do linear approximation
-				coefficients = {
-					10: 1,
-					43: 2,
-					60: 3,
-					75: 4,
-					85: 5,
-				}
-				ck = sorted(coefficients.keys())
-				if self.rate <= ck[0]:
-					factor = coefficients[ck[0]]
-				elif self.rate >= ck[-1]:
-					factor = coefficients[ck[-1]]
-				elif self.rate in ck:
-					factor = coefficients[ck[0]]
-				else:
-					li = [index for index, r in enumerate(ck) if r < self.rate][-1]
-					ri = li + 1
-					ra = ck[li]
-					rb = ck[ri]
-					factor = 1.0 * coefficients[ra] + (coefficients[rb] - coefficients[ra]) * (
-						self.rate - ra
-					) / (rb - ra)
-				pFactor = factor * item.time
-				pFactor = int(pFactor)
-				outlist.append((_eloquence.speak, (f"`p{pFactor}.",)))
+				fragment = _eloquence_text.break_fragment(item.time, options)
+				outlist.append((_eloquence.speak, (fragment,)))
 				queued_speech = True
 			elif isinstance(item, LangChangeCommand):
 				voice_id = self._resolve_voice_for_language(item.lang)
@@ -951,12 +930,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			synthDoneSpeaking.notify(synth=self)
 			return
 
-		# Trailing Pause Logic from IBMTTS:
-		if last is not None and last.rstrip()[-1] not in punctuation:
-			# Mode 0 uses p0 for legacy speed performance
-			# Mode 1 and 2 use p1 for standard modern speed
-			p_val = "0" if self._pause_mode == 0 else "1"
-			outlist.append((_eloquence.speak, (f"`p{p_val} ",)))
+		if last is not None:
+			trailing_pause = _eloquence_text.trailing_pause(last, options)
+			if trailing_pause is not None:
+				outlist.append((_eloquence.speak, (trailing_pause,)))
 
 		outlist.append((_eloquence.index, (0xFFFF,)))
 		outlist.append((_eloquence.synth, ()))
@@ -964,45 +941,6 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		seq = _eloquence._client._sequence
 		_eloquence.synth_queue.put((outlist, seq))
 		_eloquence.process()
-
-	def xspeakText(self, text, voice_id=None, should_pause=False):
-		if voice_id is None:
-			voice_id = getattr(self, "_defaultVoice", _eloquence.params.get(9))
-		try:
-			voice_id = int(voice_id)
-		except (TypeError, ValueError):
-			log.debug("Preprocessing text with invalid voice id %r; using raw value", voice_id)
-		text = _text_preprocessing.preprocess(text, voice_id)
-		if not self._backquoteVoiceTags:
-			text = text.replace("`", " ")
-		text = "`vv%d %s" % (
-			self.getVParam(_eloquence.vlm),
-			text,
-		)  # no embedded commands
-
-		# IBMTTS Regex Injection Logic for dynamic pausing:
-		if self._pause_mode == 0:
-			# Mode 0 (Do not shorten) maps punctuation to p0 for legacy snappy performance.
-			text = pause_re.sub(r"\1 `p0\2\3\4", text)
-		elif self._pause_mode == 2:
-			# Mode 2 (Shorten all pauses) maps punctuation to p1 for consistent modern shortening.
-			text = pause_re.sub(r"\1 `p1\2\3\4", text)
-
-		text = time_re.sub(r"\1:\2 \3", text)
-		if self._ABRDICT:
-			text = "`da1 " + text
-		else:
-			text = "`da0 " + text
-		if self._phrasePrediction:
-			text = "`pp1 " + text
-		else:
-			text = "`pp0 " + text
-		# if two strings are sent separately, pause between them. This might fix some of the audio issues we're having.
-		if should_pause:
-			p_val = "0" if self._pause_mode == 0 else "1"
-			text = text + f" `p{p_val}."
-		return text
-		#  _eloquence.speak(text, index)
 
 	# def cancel(self):
 	#  self.dll.eciStop(self.handle)

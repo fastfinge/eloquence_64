@@ -56,6 +56,10 @@ _Avoid_: sanitization, normalization, regex fixes
 The character encoding used when sending Eloquence Text bytes to the Eloquence Engine for the active Voice Identity.
 _Avoid_: MBCS, language encoding, current lang
 
+**Eloquence Text Builder**:
+The pure transform that turns Speech Sequence text into engine-ready Eloquence Text for a Voice Identity, applying Text Preprocessing, inline Eloquence command annotation under the active Pause Policy and speech settings, and Engine Encoding. It is the sole producer of Eloquence Text, including standalone pause and break fragments.
+_Avoid_: xspeakText, text pipeline, annotator, preprocessing (for the whole transform)
+
 **Script Conversion**:
 The Traditional-to-Simplified Chinese transformation applied during Text Preprocessing whenever the Mandarin Chinese Voice Identity is active, so Traditional-script text is pronounceable by the Simplified-only engine data.
 _Avoid_: T2S, fallback, traditional fallback, OpenCC conversion, CHS fallback

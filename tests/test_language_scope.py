@@ -211,7 +211,7 @@ def _load_driver():
 		preprocess_calls.append((text, voice_id))
 		return f"{voice_id}:{text}"
 
-	module._text_preprocessing.preprocess = preprocess
+	module._eloquence_text._text_preprocessing.preprocess = preprocess
 	return module, eloquence_stub, preprocess_calls
 
 
@@ -225,6 +225,7 @@ def _new_driver(module):
 	driver._backquoteVoiceTags = False
 	driver._ABRDICT = False
 	driver._phrasePrediction = False
+	driver.rate = 50
 	return driver
 
 
