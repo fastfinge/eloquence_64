@@ -112,8 +112,7 @@ class TempProsodyAcrossVoiceSwitchTests(unittest.TestCase):
 		self.assertEqual(
 			values[-1],
 			(BASE_PITCH, False),
-			"after a prosody revert the language change must leave pitch at "
-			"base: %r" % values,
+			"after a prosody revert the language change must leave pitch at base: %r" % values,
 		)
 
 	def test_stop_clears_pending_prosody(self):
@@ -125,8 +124,7 @@ class TempProsodyAcrossVoiceSwitchTests(unittest.TestCase):
 		self.assertEqual(
 			values[-1],
 			(BASE_PITCH, False),
-			"cancelled speech must not leak its temporary pitch into the "
-			"next voice switch: %r" % values,
+			"cancelled speech must not leak its temporary pitch into the next voice switch: %r" % values,
 		)
 
 	def test_reapplied_pitch_clamped_to_param_max(self):
