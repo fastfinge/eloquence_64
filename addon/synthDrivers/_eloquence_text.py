@@ -11,19 +11,23 @@ pause_re = re.compile(r"([a-zA-Z0-9]|\s)([,.:;?!)])(\2*?)(\s|[\\/]|$|$)")
 time_re = re.compile(r"(\d):(\d+):(\d+)")
 punctuation = b",.?:;)(?!"
 
-_ENGINE_ENCODINGS = MappingProxyType({
-	393216: "gb18030",
-	524288: "cp932",
-	655360: "cp949",
-})
+_ENGINE_ENCODINGS = MappingProxyType(
+	{
+		393216: "gb18030",
+		524288: "cp932",
+		655360: "cp949",
+	}
+)
 
-_BREAK_FACTORS = MappingProxyType({
-	10: 1,
-	43: 2,
-	60: 3,
-	75: 4,
-	85: 5,
-})
+_BREAK_FACTORS = MappingProxyType(
+	{
+		10: 1,
+		43: 2,
+		60: 3,
+		75: 4,
+		85: 5,
+	}
+)
 
 
 @dataclass(frozen=True)

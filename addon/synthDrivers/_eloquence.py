@@ -544,6 +544,7 @@ langs = {
 	"kor": (655360, "Korean"),
 }  # 0x000A0000
 
+
 def _ascii_safe_dir(directory):
 	"""Return *directory* as an ASCII path the ANSI ECI engine can open, or ``None``.
 
