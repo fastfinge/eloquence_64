@@ -170,8 +170,13 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			# Panel creation failed, but don't crash - synth will still work
 
 	def onCopyHelper(self, evt):
-		"""Copies eloquence_host32.exe with UAC elevation support and definitive feedback."""
-		source_file = os.path.normpath(os.path.join(os.path.dirname(__file__), "eloquence_host32.exe"))
+		"""Copies the Eloquence Host Process with UAC elevation and definitive feedback.
+
+		The host ships as a PyInstaller onedir tree and resolves its ``_internal``
+		directory relative to the executable, so the whole directory has to go
+		across -- copying the .exe on its own leaves a host that cannot start.
+		"""
+		source_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "eloquence_host32"))
 		prog_files = os.environ.get("ProgramFiles", "C:\\Program Files")
 		target_addon_dir = os.path.normpath(
 			os.path.join(prog_files, "NVDA", "systemConfig", "addons", "Eloquence")
@@ -191,12 +196,12 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			return
 
 		dest_dir = os.path.normpath(os.path.join(target_addon_dir, "synthDrivers"))
-		dest_file = os.path.normpath(os.path.join(dest_dir, "eloquence_host32.exe"))
+		dest_host_dir = os.path.normpath(os.path.join(dest_dir, "eloquence_host32"))
 
-		if not os.path.exists(source_file):
+		if not os.path.isdir(source_dir):
 			wx.MessageBox(
 				# Translators: Text of a message dialog when copying the helper to system config
-				_("Source file not found at:\n{source_file}").format(source_file=source_file),
+				_("Source folder not found at:\n{source_dir}").format(source_dir=source_dir),
 				# Translators: Title of a message dialog when copying the helper to system config
 				_("Error"),
 				wx.OK | wx.ICON_ERROR,
@@ -204,7 +209,9 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			return
 
 		# Prepare elevated command: ensure subdirectory exists and copy the helper
-		cmd_params = f'/c mkdir "{dest_dir}" 2>nul & copy /y "{source_file}" "{dest_file}"'
+		# tree.  xcopy /E /I /Y writes the contents of source_dir into
+		# dest_host_dir, creating it and overwriting without prompting.
+		cmd_params = f'/c mkdir "{dest_dir}" 2>nul & xcopy /E /I /Y "{source_dir}" "{dest_host_dir}"'
 
 		try:
 			# Triggering UAC Elevation using ShellExecuteW's "runas" verb
@@ -216,7 +223,7 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				wx.MessageBox(
 					_(
 						# Translators: text of a message dialog when copying the helper to system config
-						"Successfully copied eloquence_host32.exe to systemConfig!\n\nEloquence should now load normally on logon screen, start-up, and other secure screens."
+						"Successfully copied the Eloquence helper to systemConfig!\n\nEloquence should now load normally on logon screen, start-up, and other secure screens."
 					),
 					# Translators: Title of a message dialog when copying the helper to system config
 					_("Success"),

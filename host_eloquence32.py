@@ -169,6 +169,20 @@ VLM = 7
 ECI_INPUT_TYPE = 1
 ECI_SYNTH_MODE = 8  # 0=Sentence, 1=Manual
 
+# Size of the Eloquence Engine's PCM output buffer, in 16-bit samples.  The
+# engine fires its audio callback once this many samples are ready, so this sets
+# the granularity of every Audio Chunk on the Host Channel -- and with it the
+# floor on how soon NVDA can start playing an utterance.
+#
+# At the 11025 Hz output rate one Audio Chunk covers
+# OUTPUT_BUFFER_SAMPLES / 11025 seconds: 1100 samples is just under 100 ms,
+# where the previous 3300 was just under 300 ms.  The extra Host Channel traffic
+# is negligible -- framing and unframing a chunk costs about 1.6 us against the
+# ~100 ms of audio it carries -- so the tradeoff is latency against how much
+# slack the Audio Playback Pipeline has to absorb a scheduling hiccup.  Lower
+# this further only alongside testing for underruns on slow machines.
+OUTPUT_BUFFER_SAMPLES = 1100
+
 # A sentinel index value used by Eloquence to mark the end of a chunk.
 FINAL_INDEX = 0xFFFF
 
@@ -255,7 +269,7 @@ class EloquenceRuntime:
 		self._loaded_dictionary_languages: set[str] = set()
 		self._callback = Callback(self._on_callback)
 		self._audio_buffer = BytesIO()
-		self._samples = 3300
+		self._samples = OUTPUT_BUFFER_SAMPLES
 		# eciSetOutputBuffer expects a pointer to 16-bit PCM samples.  Using a
 		# c_short array keeps the data in the correct format and avoids the
 		# char* semantics of create_string_buffer which truncate at the first
@@ -633,4 +647,14 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-	main()
+	try:
+		main()
+	except Exception:
+		# This process is built with --noconsole, so an escaping traceback has
+		# nowhere to go: PyInstaller's windowed bootloader parks on a message box
+		# the user cannot see, and the Eloquence Host Process hangs instead of
+		# exiting.  Record the failure in eloquence-host.log, which the add-on
+		# already reads for diagnostics, and exit non-zero so the Synth Driver
+		# side reports a real exit code rather than a connect timeout.
+		LOGGER.exception("Eloquence Host Process terminating on an unhandled error")
+		sys.exit(1)

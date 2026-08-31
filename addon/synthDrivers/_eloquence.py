@@ -23,11 +23,17 @@ from buildVersion import version_year
 LOGGER = logging.getLogger(__name__)
 
 HOST_EXECUTABLE = "eloquence_host32.exe"
+# The PyInstaller onedir tree the Eloquence Host Process ships as.  The exe sits
+# at its root beside an _internal directory it resolves relative to itself, so
+# the tree has to stay intact -- the exe alone will not run.
+HOST_DIRECTORY = "eloquence_host32"
 HOST_SCRIPT = "host_eloquence32.py"
 # How long to wait for the Eloquence Host Process to open the Host Channel.
 HOST_CONNECT_TIMEOUT = 10.0
-# Seconds to let the host exit on its own before we terminate it. A onefile
-# PyInstaller build only removes its _MEI temp directory on a clean exit.
+# Seconds to let the host exit on its own before we terminate it.  A onefile
+# build needed this to clean up its _MEI temp directory; the onedir build has
+# nothing to unpack, but a cooperative exit still lets the Eloquence Engine shut
+# down through eciDelete rather than dying mid-call.
 HOST_EXIT_TIMEOUT = 3.0
 
 
@@ -273,9 +279,15 @@ class EloquenceHostClient:
 		override = os.environ.get("ELOQUENCE_HOST_COMMAND")
 		if override:
 			return shlex.split(override)
-		exe_path = os.path.join(addon_dir, HOST_EXECUTABLE)
+		exe_path = os.path.join(addon_dir, HOST_DIRECTORY, HOST_EXECUTABLE)
 		if os.path.exists(exe_path):
 			return [exe_path]
+		# A onefile build from before the onedir switch, left over in a
+		# development tree that has not re-run build_host.cmd.
+		legacy_path = os.path.join(addon_dir, HOST_EXECUTABLE)
+		if os.path.exists(legacy_path):
+			LOGGER.warning("Using legacy onefile host at %s; re-run build_host.cmd", legacy_path)
+			return [legacy_path]
 		script_path = os.path.join(addon_dir, HOST_SCRIPT)
 		if os.path.exists(script_path):
 			raise RuntimeError(

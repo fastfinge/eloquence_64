@@ -43,7 +43,9 @@ This produces `eloquence-12.nvda-addon` (version number comes from `buildVars.py
 build_host.cmd
 ```
 
-This compiles the Eloquence Host Process executable with PyInstaller from the `uv` `host-build` dependency group (requires 32-bit Python 3.13) and copies it into `addon/synthDrivers/`.
+This compiles the Eloquence Host Process with PyInstaller from the `uv` `host-build` dependency group (requires 32-bit Python 3.13) and copies the resulting tree to `addon/synthDrivers/eloquence_host32/`.
+
+The build is `--onedir`, not `--onefile`. A onefile build re-extracts its whole archive to `%TEMP%` on every launch, costing 1.1-3.5s before the Host Channel even opens, and is the shape antivirus heuristics most often flag. The exe resolves `_internal/` relative to itself, so the tree must be kept together.
 
 ### Full Rebuild from Scratch
 ```bash
@@ -58,7 +60,7 @@ scons.bat
 The add-on uses a host-process architecture to bridge 64-bit and 32-bit code:
 
 - **Synth Driver side (64-bit NVDA)**: `addon/synthDrivers/eloquence.py`, `_eloquence.py`, `_eloquence_ipc.py`
-- **Eloquence Host Process (32-bit)**: `host_eloquence32.py` (compiled to `eloquence_host32.exe`)
+- **Eloquence Host Process (32-bit)**: `host_eloquence32.py` (compiled to the `eloquence_host32/` onedir tree)
 - **Host Channel**: local authenticated IPC between the Synth Driver side and the Eloquence Host Process
 
 The Synth Driver side spawns the Eloquence Host Process, which loads the Eloquence Engine (`eci.dll`) directly. Audio Chunks and synthesis events flow back to NVDA through the Host Channel.
@@ -130,7 +132,9 @@ eloquence_64/
 │       ├── _eloquence.py               # Synth Driver side wrapper
 │       ├── _eloquence_updater.py       # Auto-updater
 │       ├── _eloquence_ipc.py           # Host Channel helpers
-│       ├── eloquence_host32.exe        # BUILT by build_host.cmd (gitignored)
+│       ├── eloquence_host32/           # BUILT by build_host.cmd (gitignored)
+│       │   ├── eloquence_host32.exe    # PyInstaller onedir launcher
+│       │   └── _internal/              # Its runtime; the exe will not run without it
 │       └── eloquence/
 │           ├── ECI.DLL                 # PROPRIETARY (gitignored, via fetch_eci.py)
 │           ├── ECI.INI                 # Eloquence config

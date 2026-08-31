@@ -5,7 +5,7 @@ Eloquence synthesizer add-on for NVDA with full 64-bit support.
 ## 64-bit support
 
 The Eloquence DLL is 32-bit only. This add-on launches the Eloquence Host
-Process (`eloquence_host32.exe`) to load the Eloquence Engine and stream audio
+Process (`eloquence_host32/eloquence_host32.exe`) to load the Eloquence Engine and stream audio
 back to 64-bit NVDA. The integration is transparent — no additional Python
 installation or manual steps are required.
 

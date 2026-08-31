@@ -45,8 +45,9 @@ _HEADER_STRUCT = struct.Struct("!I")
 
 _PIPE_PREFIX = r"\\.\pipe\eloquence-host-"
 _PIPE_NAME_BYTES = 16
-# Audio Chunks are a little over 6 KB, so this holds several without blocking
-# the Eloquence Host Process mid-synthesis.
+# Audio Chunks are a little over 2 KB (see OUTPUT_BUFFER_SAMPLES in
+# host_eloquence32.py), so this holds many without blocking the Eloquence Host
+# Process mid-synthesis.
 _PIPE_BUFFER_BYTES = 65536
 # PIPE_TYPE_BYTE, PIPE_READMODE_BYTE and PIPE_WAIT are all zero.  Byte mode keeps
 # the length-prefixed framing below in charge of message boundaries.
