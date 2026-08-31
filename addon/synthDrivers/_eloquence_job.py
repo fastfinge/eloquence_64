@@ -36,6 +36,8 @@ LOGGER = logging.getLogger(__name__)
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 # JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+# The least privilege that still answers "is this process in my job?".
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 # ULONG_PTR and SIZE_T are pointer sized; c_size_t is correct for both bitnesses.
 _ULONG_PTR = ctypes.c_size_t
@@ -90,6 +92,10 @@ def _kernel32() -> ctypes.WinDLL:
 	kernel32.SetInformationJobObject.restype = wintypes.BOOL
 	kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
 	kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+	kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+	kernel32.IsProcessInJob.restype = wintypes.BOOL
+	kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+	kernel32.OpenProcess.restype = wintypes.HANDLE
 	kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 	kernel32.CloseHandle.restype = wintypes.BOOL
 	return kernel32
@@ -150,6 +156,39 @@ class HostJob:
 				)
 				return False
 		return True
+
+	def contains(self, pid: int) -> bool:
+		"""Is the process with *pid* one we put in this job?
+
+		This is how the Host Channel decides whether whoever connected to it is
+		really the Eloquence Host Process we launched.  Job membership survives
+		the onefile PyInstaller bootloader re-executing itself, which a plain
+		comparison against ``Popen.pid`` does not: the bootloader is the process
+		we spawn, the Python code that opens the Host Channel runs in the child
+		it starts, and that child inherits the job.
+		"""
+		with self._lock:
+			if self._handle is None:
+				return False
+			handle = self._handle
+			try:
+				process = self._kernel32.OpenProcess(
+					_PROCESS_QUERY_LIMITED_INFORMATION,
+					False,
+					pid,
+				)
+				if not process:
+					raise ctypes.WinError(ctypes.get_last_error())
+				try:
+					member = wintypes.BOOL()
+					if not self._kernel32.IsProcessInJob(process, handle, ctypes.byref(member)):
+						raise ctypes.WinError(ctypes.get_last_error())
+				finally:
+					self._kernel32.CloseHandle(process)
+			except Exception:
+				LOGGER.warning("Could not check job membership for pid %s", pid, exc_info=True)
+				return False
+		return bool(member)
 
 	def close(self) -> None:
 		"""Close the job handle, terminating anything still inside it.
