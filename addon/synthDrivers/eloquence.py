@@ -141,7 +141,8 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				config.conf.get("eloquence", {}).get("dictionary_name", "Alternative IBM TTS Dictionaries")
 			)
 
-			self.updateButton = sHelper.addItem(wx.Button(self, label=_("Check for updates")))
+			# Translators: Button that downloads and applies updates to the selected Eloquence dictionaries.
+			self.updateButton = sHelper.addItem(wx.Button(self, label=_("Update Dictionaries")))
 			self.Bind(wx.EVT_BUTTON, self.onUpdate, self.updateButton)
 			# When NVDA is running in secure mode, one should not be able to save any setting to disk.
 			if globalVars.appArgs.secure:
@@ -367,7 +368,11 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				return cont
 
 			addon_path = manager.download_update(download_url, download_progress)
-			progress.Update(100, _("Download complete"))
+			progress.Update(
+				100,
+				# Translators: The download has finished; closing this dialog continues the add-on installation.
+				_("Download complete. You can now close this dialog to continue installing the update."),
+			)
 			progress.Destroy()
 
 			progress = wx.ProgressDialog(

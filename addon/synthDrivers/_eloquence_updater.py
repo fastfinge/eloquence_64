@@ -102,7 +102,8 @@ class EloquenceUpdateManager:
 						downloaded += len(buffer)
 						f.write(buffer)
 						if total_size > 0:
-							percent = int(downloaded * 100 / total_size)
+							# Reserve completion for the caller after the downloaded file is closed.
+							percent = min(99, int(downloaded * 100 / total_size))
 							# Translators: Text in the progress dialog used during add-on update.
 							if not progress_callback(
 								percent, _("Downloading update... {percent}%").format(percent=percent)
