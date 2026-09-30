@@ -153,6 +153,9 @@ class EngineConfig:
 	# needs no rewriting, unlike the proprietary engine whose ECI.INI carries
 	# absolute C:\dummy\ placeholders.
 	rewrite_ini: bool = True
+	# Whether eciStop may be called at all.  False for openevv v0.3, where it is
+	# actively destructive -- see EciEngine.stop() for the measurements.
+	supports_eci_stop: bool = True
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -353,10 +356,33 @@ class EciEngine:
 				self._send_event("audio", data=b"", index=None, final=True)
 
 	def stop(self) -> None:
-		self._dll.eciStop(self._handle)
+		"""Reset after a cancellation.
+
+		What actually makes cancellation audible is upstream -- the Speech
+		Generation advances and the player is stopped -- so the engine side of this
+		is only about not carrying state into the next utterance.
+
+		eciStop is skipped entirely for engines that cannot survive it.  Measured
+		against openevv v0.3: calling eciStop while the engine is idle wedges it,
+		and it is idle whenever a cancellation reaches it, because eciSynthesize
+		has already drained by then.  The second such call leaves the engine
+		producing no audio at all for the next utterance, and the third segfaults
+		the process.  The proprietary engine runs the same sequence ten times over
+		without complaint.  eciClearInput is no substitute: it is safe on openevv
+		but does not actually discard queued text there.
+
+		Nothing is lost by skipping it.  eciStop cannot abort an utterance already
+		being synthesized on openevv either -- measured identical audio length with
+		and without it -- and the Eloquence Host Process is in the same position,
+		since its single-threaded serve loop cannot reach the engine until
+		synthesize() has returned.
+		"""
+		if self._config.supports_eci_stop:
+			self._dll.eciStop(self._handle)
 		self._audio_buffer.seek(0)
 		self._audio_buffer.truncate(0)
 		self._pending_indexes.clear()
+		self._saw_final_index = False
 		self._speaking = False
 		self._send_event("stopped")
 
@@ -515,6 +541,7 @@ class EciDispatcher:
 			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
 			voice_variant=payload.get("voiceVariant", 0),
 			rewrite_ini=payload.get("rewriteIni", True),
+			supports_eci_stop=payload.get("supportsEciStop", True),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.start()

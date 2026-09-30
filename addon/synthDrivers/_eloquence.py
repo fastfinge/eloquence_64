@@ -572,6 +572,9 @@ class DirectEngineClient(EngineClient):
 		self._eci_path = eci_path
 		self._dispatcher: Optional[_engine.EciDispatcher] = None
 		self._command_lock = threading.RLock()
+		# Set by stop() on NVDA's thread, acted on by the next command on the
+		# synthesis worker, so the engine is only ever touched from one thread.
+		self._reset_pending = False
 
 	@property
 	def started(self) -> bool:
@@ -607,34 +610,36 @@ class DirectEngineClient(EngineClient):
 		# threaded serve loop does, so a following utterance's addText cannot
 		# reach the engine while the previous synthesize() is still running.
 		with self._command_lock:
+			self._apply_pending_reset()
 			return self._dispatcher.handle(command, payload)
 
 	def stop(self) -> None:
 		if self._dispatcher is None:
 			return
-		# What makes cancellation feel immediate is the same thing that makes it
-		# immediate on the host path: the Speech Generation advances, so Audio
-		# Chunks already queued are dropped, and the player is stopped now.
+		# What makes cancellation audible is the same thing that makes it audible
+		# on the host path: the Speech Generation advances, so Audio Chunks already
+		# queued are dropped, and the player is stopped right now.
 		self.pipeline.cancel()
-		engine = self._dispatcher.engine
+		# The engine's own reset is only about not carrying state into the next
+		# utterance, so it is left for the next command to perform on the synthesis
+		# worker thread.  Doing it here would either block NVDA waiting for the
+		# command lock that an in-flight synthesize() holds, or need a thread of
+		# its own; both were tried, and every engine call belonging to one thread
+		# is worth more than either.
+		self._reset_pending = True
+
+	def _apply_pending_reset(self) -> None:
+		"""Reset the engine after a cancellation, on the calling worker thread."""
+		if not self._reset_pending:
+			return
+		self._reset_pending = False
+		engine = self._dispatcher.engine if self._dispatcher else None
 		if engine is None:
 			return
-		# eciStop must not run while another thread is inside synthesize(), so it
-		# is deferred onto a thread that waits for the command lock rather than
-		# blocking NVDA here.  The host reaches the same ordering for free by
-		# leaving the stop command queued on the Host Channel until its serve loop
-		# comes back round.
-		threading.Thread(
-			target=self._deferred_stop, args=(engine,), name="EloquenceDirectStop", daemon=True
-		).start()
-
-	def _deferred_stop(self, engine: "_engine.EciEngine") -> None:
 		try:
-			with self._command_lock:
-				if self._dispatcher is not None and self._dispatcher.engine is engine:
-					engine.stop()
+			engine.stop()
 		except Exception:
-			LOGGER.exception("Deferred engine stop failed")
+			LOGGER.exception("Engine reset after cancellation failed")
 
 	def shutdown(self) -> None:
 		if self._dispatcher is None:
@@ -796,6 +801,9 @@ def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 	payload["eciPath"] = openevv_engine_path()
 	payload["dataDirectory"] = ""
 	payload["rewriteIni"] = False
+	# openevv v0.3's eciStop wedges the engine and then crashes it; see
+	# EciEngine.stop() for the measurements.  Nothing is lost by not calling it.
+	payload["supportsEciStop"] = False
 	return payload
 
 

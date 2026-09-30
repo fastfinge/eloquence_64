@@ -291,6 +291,19 @@ class OpenevvDictionaryGapTests(unittest.TestCase):
 	def setUp(self):
 		self.module = _load_client_module()
 
+	def test_the_in_process_payload_disables_eci_stop(self):
+		# openevv v0.3's eciStop wedges the engine on the second cancellation and
+		# crashes it on the third; see tests/test_engine_cancellation.py.
+		payload = self.module._direct_initialize_payload(
+			{"eciPath": "x", "dataDirectory": "", "language": "enu"}
+		)
+		self.assertFalse(payload["supportsEciStop"])
+
+	def test_the_host_payload_leaves_eci_stop_enabled(self):
+		# The proprietary engine tolerates it and the host path relies on it.
+		payload = {"eciPath": "x", "dataDirectory": "y", "language": "enu"}
+		self.assertNotIn("supportsEciStop", payload)
+
 	def test_the_in_process_payload_carries_no_dictionary_directory(self):
 		# Measured: openevv's eciLoadDict returns 6 for every file the proprietary
 		# engine accepts with 0.  Passing a directory would load nothing and, done
@@ -307,6 +320,59 @@ class OpenevvDictionaryGapTests(unittest.TestCase):
 		original = {"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
 		self.module._direct_initialize_payload(original)
 		self.assertEqual(original["dataDirectory"], r"C:\dicts")
+
+
+class DirectCancellationTests(unittest.TestCase):
+	"""stop() must not touch the engine from NVDA's thread."""
+
+	def setUp(self):
+		self.module = _load_client_module()
+		self.pipeline = self.module.AudioPipeline()
+		self.client = self.module.DirectEngineClient(self.pipeline, "C:/nope/eci.dll")
+		self.stopped = []
+
+		class _Engine:
+			def stop(_self):
+				self.stopped.append(True)
+
+		class _Dispatcher:
+			engine = _Engine()
+
+			def knows(_self, command):
+				return True
+
+			def handle(_self, command, payload):
+				return {"command": command}
+
+		self.client._dispatcher = _Dispatcher()
+
+	def test_cancelling_does_not_call_the_engine_inline(self):
+		# It runs on NVDA's thread, where blocking on the command lock an in-flight
+		# synthesize() holds would freeze the screen reader.
+		self.client.stop()
+		self.assertEqual(self.stopped, [])
+		self.assertTrue(self.client._reset_pending)
+
+	def test_cancelling_advances_the_generation_immediately(self):
+		before = self.pipeline.sequence
+		self.client.stop()
+		self.assertGreater(self.pipeline.sequence, before)
+
+	def test_the_next_command_performs_the_reset_on_the_worker_thread(self):
+		self.client.stop()
+		self.client.send_command("addText", text=b"next utterance")
+		self.assertEqual(self.stopped, [True])
+		self.assertFalse(self.client._reset_pending)
+
+	def test_the_reset_happens_only_once_per_cancellation(self):
+		self.client.stop()
+		self.client.send_command("addText", text=b"a")
+		self.client.send_command("addText", text=b"b")
+		self.assertEqual(self.stopped, [True])
+
+	def test_no_cancellation_means_no_reset(self):
+		self.client.send_command("addText", text=b"a")
+		self.assertEqual(self.stopped, [])
 
 
 class AudioPipelineSingletonTests(unittest.TestCase):
