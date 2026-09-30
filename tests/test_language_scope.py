@@ -124,6 +124,9 @@ class _EloquenceStub(types.ModuleType):
 		}
 		self.synth_queue = _SpeechQueue()
 		self._client = types.SimpleNamespace(_sequence=1)
+		# These tests cover the proprietary engine's routing, so no fragment goes
+		# to the in-process backend and none gets the openevv bracket workaround.
+		self.voice_uses_direct_backend = lambda voice_id: False
 		self.stopped = False
 		self.processed = False
 		self.immediate_calls = []

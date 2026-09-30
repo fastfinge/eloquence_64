@@ -4,6 +4,7 @@
 import gui
 import wx
 import ctypes
+import dataclasses
 import winsound
 
 try:
@@ -124,6 +125,31 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 	def makeSettings(self, settings):
 		try:
 			sHelper = gui.guiHelper.BoxSizerHelper(self, sizer=settings)
+
+			# Engine selection.  Changing this takes effect when the synthesizer is
+			# next loaded, because an engine is chosen while opening it.
+			self.openevvCheckbox = sHelper.addItem(
+				wx.CheckBox(
+					self,
+					# Translators: Label of a checkbox in the Eloquence category of the settings dialog
+					label=_("Use the 64-bit openevv engine where it supports the language"),
+				)
+			)
+			self.openevvCheckbox.SetValue(bool(_eloquence.openevv_enabled()))
+			openevv_version = _eloquence.openevv_version()
+			if not _eloquence.openevv_available():
+				self.openevvCheckbox.Disable()
+				# Translators: Shown when the openevv engine is missing from the add-on.
+				openevv_status = _("The openevv engine is not present in this add-on.")
+			else:
+				openevv_status = _(
+					# Translators: Explains the openevv engine option. {version} is a release
+					# tag such as v0.3.
+					"openevv {version} runs inside NVDA, with no helper process. "
+					"Languages it does not support fall back to the 32-bit helper "
+					"automatically. Takes effect when the synthesizer is next loaded."
+				).format(version=openevv_version or _("unknown version"))
+			sHelper.addItem(wx.StaticText(self, label=openevv_status))
 
 			self.dictionarySources = {
 				"https://github.com/mohamed00/AltIBMTTSDictionaries": "Alternative IBM TTS Dictionaries",
@@ -375,6 +401,8 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 	def onSave(self):
 		if "eloquence" not in config.conf:
 			config.conf["eloquence"] = {}
+		if self.openevvCheckbox.IsEnabled():
+			config.conf["eloquence"]["use_openevv"] = self.openevvCheckbox.GetValue()
 		selection = self.dictionaryChoice.GetStringSelection()
 		for url, name in self.dictionarySources.items():
 			if name == selection:
@@ -658,6 +686,11 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		pending_indexes = []
 		queued_speech = False
 		options = self._build_options()
+		# The openevv bracket workaround is per fragment, because a mixed-language
+		# utterance can cross backends mid-sentence and the proprietary engine must
+		# not get the rewrite.  Both variants are built once here rather than per
+		# fragment.
+		direct_options = dataclasses.replace(options, attach_spaced_brackets=True)
 		sequence_voice = getattr(self, "_defaultVoice", str(_eloquence.params.get(9, 65536)))
 		last_queued_engine_voice = getattr(self, "_lastEngineVoice", None)
 
@@ -679,7 +712,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		for item in speechSequence:
 			if isinstance(item, str):
 				s = str(item)
-				s = _eloquence_text.build(s, voice_id=sequence_voice, options=options)
+				fragment_options = (
+					direct_options
+					if _eloquence.voice_uses_direct_backend(sequence_voice)
+					else options
+				)
+				s = _eloquence_text.build(s, voice_id=sequence_voice, options=fragment_options)
 				outlist.append((_eloquence.speak, (s,)))
 				last = s
 				queued_speech = True

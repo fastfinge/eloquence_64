@@ -40,6 +40,9 @@ class BuildOptions:
 	backquote_tags: bool
 	abbreviation_dict: bool
 	phrase_prediction: bool
+	# Set only for the in-process openevv backend, which mispronounces a bracket
+	# that whitespace separates from its text.  See attach_spaced_brackets().
+	attach_spaced_brackets: bool = False
 
 
 def _engine_encode(text: str, voice_id) -> bytes:
@@ -60,6 +63,11 @@ def build(text: str, voice_id: int, options: BuildOptions) -> bytes:
 	except (TypeError, ValueError):
 		pass
 	text = _text_preprocessing.preprocess(text, voice_id)
+	# Before any backquote command is added, so the rewrite only ever sees user
+	# text.  Skipped in raw backquote-tag mode, where the author is addressing the
+	# engine directly and spacing may be deliberate.
+	if options.attach_spaced_brackets and not options.backquote_tags:
+		text = _text_preprocessing.attach_spaced_brackets(text)
 	if not options.backquote_tags:
 		text = text.replace("`", " ")
 	text = f"`vv{options.volume} {text}"

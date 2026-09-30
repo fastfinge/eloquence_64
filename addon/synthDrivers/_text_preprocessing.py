@@ -20,6 +20,37 @@ from ._script_conversion import convert_traditional_to_simplified
 # because NVDA's symbol processing may preserve or remove them.
 _PHRASE_FINAL_EM_DASH = re.compile(r"\u2014(?=[\"'\u2019\u201d)\]}]*\s*$)")
 
+# openevv speaks the *name* of a bracket that whitespace separates from its
+# text -- "( hello )" comes out as "left paren hello right paren" -- where a
+# bracket touching its text stays silent and merely shapes the prosody.  Measured
+# against openevv v0.3 at 11025 Hz, "( hello world )" runs 2.83x longer than
+# "(hello world)"; brackets are 2.21x and braces 2.00x.  The proprietary engine
+# shows no such difference, so this is an openevv defect and the fix is applied
+# only on that backend, where it restores parity rather than changing behaviour.
+#
+# The affected set was measured, not assumed, and it is narrower than it looks:
+# colons, commas, periods, semicolons, dashes, apostrophes and angle brackets all
+# match the proprietary engine within noise and are deliberately left alone.
+# Timestamps need nothing either -- "12:30:45" does misread, but the existing
+# time_re in _eloquence_text.py already rewrites it into the form that does not.
+#
+# Both patterns require real text on the far side, so a bracket standing alone --
+# character navigation, or a symbol name NVDA has already spelled out -- keeps its
+# spacing and is still announced.
+_SPACED_OPEN_BRACKET = re.compile(r'([(\[{"])[ \t]+(?=[^\s)\]}])')
+_SPACED_CLOSE_BRACKET = re.compile(r'(?<=[^\s(\[{])[ \t]+([)\]}"])')
+
+
+def attach_spaced_brackets(text):
+	"""Join brackets to their adjacent text, keeping the punctuation itself.
+
+	Works around the openevv bug described above.  Only whitespace between a
+	bracket and its text is removed; nothing is added, removed or reordered, so
+	the engine still sees the same punctuation for prosody.
+	"""
+	text = _SPACED_OPEN_BRACKET.sub(r"\1", text)
+	return _SPACED_CLOSE_BRACKET.sub(r"\1", text)
+
 # ---------------------------------------------------------------------------
 # Crash prevention dictionaries
 # ---------------------------------------------------------------------------

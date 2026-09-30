@@ -58,8 +58,10 @@ class FakePlayer:
 		self.sync()
 
 
-class FakeClient:
-	_sequence = 0
+class FakePipeline:
+	"""Stands in for the shared AudioPipeline; only the generation is read."""
+
+	sequence = 0
 
 
 class AudioWorkerTests(unittest.TestCase):
@@ -75,7 +77,7 @@ class AudioWorkerTests(unittest.TestCase):
 		audio_queue.put((b"", 42, False, 0))
 		audio_queue.put(None)
 		player = FakePlayer(events)
-		worker = module.AudioWorker(player, audio_queue, FakeClient())
+		worker = module.AudioWorker(player, audio_queue, FakePipeline())
 
 		worker.run()
 
@@ -97,7 +99,7 @@ class AudioWorkerTests(unittest.TestCase):
 		audio_queue.put(None)
 		player = FakePlayer(events)
 
-		module.AudioWorker(player, audio_queue, FakeClient()).run()
+		module.AudioWorker(player, audio_queue, FakePipeline()).run()
 
 		self.assertEqual(events, [("feed", b"first"), ("feed", b"last")])
 		self.assertEqual(len(player.on_done), 1)
@@ -115,7 +117,7 @@ class AudioWorkerTests(unittest.TestCase):
 		audio_queue.put(None)
 		player = FakePlayer(events)
 
-		module.AudioWorker(player, audio_queue, FakeClient()).run()
+		module.AudioWorker(player, audio_queue, FakePipeline()).run()
 
 		self.assertLess(events.index(("feed", b"audio")), events.index(("index", 42)))
 		self.assertLess(events.index(("index", 42)), events.index(("index", None)))
