@@ -10,8 +10,21 @@ addonHandler.initTranslation()
 
 log = logging.getLogger(__name__)
 
+# Longest wait for any single connect or read, so a stalled server ends in an error instead of a hang.
+NETWORK_TIMEOUT_SECONDS = 30
+
+
+class UpdateCancelled(Exception):
+	"""The user cancelled the Add-on Package download."""
+
 
 class EloquenceUpdateManager:
+	"""Checks for, downloads and installs Add-on Updates.
+
+	check_for_updates and download_update block on the network and must run outside NVDA's UI thread.
+	install_update and prompt_for_restart open NVDA dialogs and must run on the UI thread.
+	"""
+
 	REPO_OWNER = "fastfinge"
 	REPO_NAME = "eloquence_64"
 
@@ -43,7 +56,7 @@ class EloquenceUpdateManager:
 		try:
 			headers = {"User-Agent": "NVDA-Eloquence-Updater"}
 			req = urllib.request.Request(api_url, headers=headers)
-			with urllib.request.urlopen(req) as response:
+			with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT_SECONDS) as response:
 				data = json.loads(response.read().decode())
 
 			latest_version = data.get("tag_name", "0.0.0").lstrip("v")
@@ -79,8 +92,13 @@ class EloquenceUpdateManager:
 		except Exception:
 			return latest != current
 
-	def download_update(self, download_url, progress_callback):
-		"""Downloads the update and returns the path to the add-on package."""
+	def download_update(self, download_url, report_progress, is_cancelled):
+		"""Downloads the update and returns the path to the add-on package.
+
+		report_progress(percent, message) may be called from the calling thread at any time.
+		Raises UpdateCancelled once is_cancelled() returns True. A cancelled or failed download
+		leaves no temporary files behind.
+		"""
 		if not os.path.exists(self.temp_dir):
 			os.makedirs(self.temp_dir)
 
@@ -89,13 +107,15 @@ class EloquenceUpdateManager:
 		try:
 			headers = {"User-Agent": "NVDA-Eloquence-Updater"}
 			req = urllib.request.Request(download_url, headers=headers)
-			with urllib.request.urlopen(req) as response:
+			with urllib.request.urlopen(req, timeout=NETWORK_TIMEOUT_SECONDS) as response:
 				total_size = int(response.info().get("Content-Length", 0))
 				downloaded = 0
 				block_size = 8192
 
 				with open(addon_path, "wb") as f:
 					while True:
+						if is_cancelled():
+							raise UpdateCancelled()
 						buffer = response.read(block_size)
 						if not buffer:
 							break
@@ -105,13 +125,16 @@ class EloquenceUpdateManager:
 							# Reserve completion for the caller after the downloaded file is closed.
 							percent = min(99, int(downloaded * 100 / total_size))
 							# Translators: Text in the progress dialog used during add-on update.
-							if not progress_callback(
+							report_progress(
 								percent, _("Downloading update... {percent}%").format(percent=percent)
-							):
-								raise Exception("Download cancelled by user")
+							)
 			return addon_path
+		except UpdateCancelled:
+			self.cleanup()
+			raise
 		except Exception as e:
 			log.error(f"Error downloading update: {e}")
+			self.cleanup()
 			raise
 
 	def install_update(self, addon_path, parent=None):

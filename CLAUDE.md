@@ -128,7 +128,9 @@ eloquence_64/
 │   └── synthDrivers/
 │       ├── eloquence.py                # Main synth driver
 │       ├── _eloquence.py               # Synth Driver side wrapper
-│       ├── _eloquence_updater.py       # Auto-updater
+│       ├── _eloquence_updater.py       # Add-on Update: release check, download, install
+│       ├── _dictionary_update.py       # Dictionary Update: download, merge rules, atomic writes
+│       ├── _background_work.py         # Runs update work off NVDA's UI thread behind a progress dialog
 │       ├── _eloquence_ipc.py           # Host Channel helpers
 │       ├── eloquence_host32.exe        # BUILT by build_host.cmd (gitignored)
 │       └── eloquence/
