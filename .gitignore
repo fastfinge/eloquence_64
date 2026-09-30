@@ -16,6 +16,11 @@ addon/synthDrivers/eloquence/FRC.SYN
 addon/synthDrivers/eloquence/ITA.SYN
 addon/synthDrivers/eloquence/PTB.SYN
 
+# openevv engine, fetched at build time by fetch_eci.py.  MIT, except that its
+# own NOTICE excludes the IBM-derived lang/enus data compiled into the DLL, so it
+# is kept out of source control like the proprietary files above.
+addon/synthDrivers/openevv/
+
 # Compiled host tree (built from host_eloquence32.py via PyInstaller --onedir)
 addon/synthDrivers/eloquence_host32/
 # Leftover onefile output from before the onedir switch

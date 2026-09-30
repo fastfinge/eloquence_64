@@ -14,6 +14,10 @@ sys.dont_write_bytecode = True
 
 import buildVars  # noqa: E402
 
+# Reused rather than reimplemented so the build and the fetcher cannot disagree
+# about what counts as a loadable 64-bit engine.
+from fetch_eci import _is_pe32_plus as is_pe32_plus  # noqa: E402
+
 env = Environment(ENV=os.environ, tools=["NVDATool"])
 env.Append(addon_info=buildVars.addon_info)
 env.Append(**buildVars.addon_info)
@@ -73,6 +77,26 @@ if not (host_dir / "_internal").is_dir():
 	)
 	Exit(1)
 
+# The openevv engine the Synth Driver side loads in NVDA's own process.
+openevv_dll = addonDir / "synthDrivers" / "openevv" / "eci.dll"
+if not openevv_dll.exists():
+	print(
+		f"ERROR: {openevv_dll} not found.\nRun `python fetch_eci.py` to download the openevv engine.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
+if not is_pe32_plus(openevv_dll):
+	# A 32-bit DLL here would build a perfectly valid add-on that then fails to
+	# load the engine at synth start-up with nothing but an OSError, so this is
+	# worth catching while there is still somewhere useful to say it.
+	print(
+		f"ERROR: {openevv_dll} is not a 64-bit PE image.\n"
+		"64-bit NVDA cannot load it. Re-run `python fetch_eci.py --force`.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
 # --- Generate manifest ----------------------------------------------------
 
 manifest = env.NVDAManifest(env.File(str(addonDir / "manifest.ini")), "manifest.ini.tpl")
@@ -87,6 +111,12 @@ env.Depends(manifest, env.Value(buildVars.addon_info["addon_version"]))
 # --- Build addon bundle ----------------------------------------------------
 
 addonFile = env.File("${addon_name}-${addon_version}.nvda-addon")
+
+# Bytecode left in the source tree by a dev run or the test suite is not ours to
+# ship: it is compiled by whichever Python happened to import the module, not by
+# the one inside NVDA, so it is dead weight at best.  NVDA recompiles from source
+# on load.
+env.Replace(excludePatterns=("*.pyc", "*.pyo", "__pycache__/*"))
 
 addon = env.NVDAAddon(addonFile, env.Dir(str(addonDir)))
 env.Depends(addon, moFiles)
