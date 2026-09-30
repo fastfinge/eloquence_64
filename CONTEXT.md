@@ -1,6 +1,6 @@
 # Eloquence NVDA Add-on
 
-The Eloquence NVDA Add-on provides an NVDA synth driver for the 32-bit Eloquence/ECI engine, including voice control, speech sequencing, Eloquence Host Process communication, dictionary handling, and secure-screen support.
+The Eloquence NVDA Add-on provides an NVDA synth driver for the Eloquence/ECI engine, including voice control, speech sequencing, Engine Backend selection, Eloquence Host Process communication, dictionary handling, and secure-screen support.
 
 ## Language
 
@@ -29,8 +29,28 @@ _Avoid_: say all, continuous speech, read all
 ### Eloquence Runtime
 
 **Eloquence Engine**:
-The proprietary 32-bit speech synthesis runtime, including ECI.DLL and its voice data, that turns Eloquence commands and text into audio.
+A speech synthesis runtime exposing the ECI interface, with its voice data, that turns Eloquence commands and text into audio. Either the proprietary 32-bit ECI.DLL or the openevv Engine.
 _Avoid_: DLL, ECI, host
+
+**Engine Backend**:
+One of the two ways the Synth Driver side reaches an Eloquence Engine: the Eloquence Host Process, or the Direct Backend. Selected by the user, and chosen per Voice Identity at speech time according to Engine Language Coverage.
+_Avoid_: mode, engine, driver, path, transport
+
+**Direct Backend**:
+The Engine Backend that loads a 64-bit Eloquence Engine inside NVDA's own process, with no Eloquence Host Process and no Host Channel.
+_Avoid_: in-process mode, direct mode, native mode, openevv mode
+
+**openevv Engine**:
+The MIT-licensed reimplementation of IBM's Embedded ViaVoice that ships a 64-bit library exporting the ECI names, fetched at build time and loaded by the Direct Backend.
+_Avoid_: openevv, open evv, the new engine, the 64-bit DLL
+
+**Engine Language Coverage**:
+The set of Voice Identities an Eloquence Engine reports it can create, read from the engine at speech-driver start rather than hardcoded. A Voice Identity outside the Direct Backend's coverage is served by the Eloquence Host Process instead.
+_Avoid_: supported languages, available languages, language list
+
+**Engine Fallback**:
+Routing a Voice Identity to the Eloquence Host Process because it lies outside the Direct Backend's Engine Language Coverage. Both Engine Backends may be running at once for this reason.
+_Avoid_: fallback, degradation, failover
 
 **Eloquence Host Process**:
 The 32-bit process that loads and controls the Eloquence Engine for 64-bit NVDA and communicates with the Synth Driver over local IPC.
@@ -41,7 +61,7 @@ The local authenticated IPC connection between the Synth Driver side and the Elo
 _Avoid_: socket, RPC protocol, pipe, connection
 
 **Host Command**:
-A request sent from the Synth Driver side to the Eloquence Host Process to perform an Eloquence Engine operation such as initializing, adding text, setting a Voice Parameter, inserting a Speech Index, synthesizing, or stopping.
+A request from the Synth Driver side for an Eloquence Engine operation such as initializing, adding text, setting a Voice Parameter, inserting a Speech Index, synthesizing, or stopping. Carried over the Host Channel to the Eloquence Host Process, or executed directly by the Direct Backend; both Engine Backends interpret the same command set.
 _Avoid_: RPC, message, IPC call
 
 **Eloquence Text**:
@@ -105,11 +125,11 @@ _Avoid_: pause mode, shorten pauses, dynamic pausing
 ### Audio
 
 **Audio Chunk**:
-A piece of synthesized audio from the Eloquence Host Process, optionally carrying a Speech Index and a final-completion flag for NVDA playback coordination.
+A piece of synthesized audio from an Eloquence Engine, optionally carrying a Speech Index and a final-completion flag for NVDA playback coordination.
 _Avoid_: audio event, buffer, wave data
 
 **Audio Playback Pipeline**:
-The Synth Driver side flow that receives Audio Chunks, feeds synthesized audio to NVDA's wave player, and reports Speech Index and completion notifications back to NVDA.
+The Synth Driver side flow that receives Audio Chunks, feeds synthesized audio to NVDA's wave player, and reports Speech Index and completion notifications back to NVDA. There is exactly one, shared by both Engine Backends, so an Engine Fallback cannot produce two wave players or two Speech Generation counters.
 _Avoid_: audio worker, WavePlayer, audio queue
 
 **Speech Generation**:
