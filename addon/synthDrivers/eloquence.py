@@ -146,8 +146,10 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 					# Translators: Explains the openevv engine option. {version} is a release
 					# tag such as v0.3.
 					"openevv {version} runs inside NVDA, with no helper process. "
-					"Languages it does not support fall back to the 32-bit helper "
-					"automatically. Takes effect when the synthesizer is next loaded."
+					"It currently supports English only; other languages fall back to "
+					"the 32-bit helper automatically. Pronunciation dictionaries are "
+					"not supported by openevv and apply only to the helper. "
+					"Takes effect when the synthesizer is next loaded."
 				).format(version=openevv_version or _("unknown version"))
 			sHelper.addItem(wx.StaticText(self, label=openevv_status))
 
@@ -790,7 +792,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		outlist.append((_eloquence.index, (0xFFFF,)))
 		outlist.append((_eloquence.synth, ()))
 		self._lastEngineVoice = last_queued_engine_voice
-		seq = _eloquence._client._sequence
+		seq = _eloquence.current_generation()
 		_eloquence.synth_queue.put((outlist, seq))
 		_eloquence.process()
 

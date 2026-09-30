@@ -686,8 +686,17 @@ _synth_worker_stop = threading.Event()
 
 # Backend routing ----------------------------------------------------------------
 def openevv_enabled() -> bool:
-	"""Whether the user asked for the in-process openevv engine."""
-	return bool(config.conf.get("eloquence", {}).get("use_openevv", False))
+	"""Whether the user asked for the in-process openevv engine.
+
+	The Eloquence Host Process is the default, and stays the default for any
+	value this cannot read as an explicit yes.  NVDA stores this section without
+	a confspec, so the value comes back as a string: ``bool("False")`` is True,
+	which would have turned the engine on for a user who had just turned it off.
+	"""
+	raw = config.conf.get("eloquence", {}).get("use_openevv", False)
+	if isinstance(raw, str):
+		return raw.strip().lower() in {"true", "yes", "on", "1"}
+	return bool(raw)
 
 
 def openevv_available() -> bool:
@@ -719,6 +728,16 @@ def backend_for_voice(voice_id) -> EngineClient:
 	if numeric_voice in _direct_languages:
 		return _direct_client
 	return _client
+
+
+def current_generation() -> int:
+	"""The Speech Generation to stamp newly queued synthesis work with.
+
+	Public because the Synth Driver needs it when queueing an utterance.  It used
+	to reach into the host client's private counter, which broke silently the
+	moment that counter moved to the shared Audio Playback Pipeline.
+	"""
+	return _pipeline.sequence
 
 
 def voice_uses_direct_backend(voice_id) -> bool:
@@ -766,8 +785,12 @@ def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""Retarget an initialize payload at the in-process openevv engine.
 
 	openevv resolves its own data relative to the DLL and ships an eci.ini that
-	needs none of the C:\\dummy\\ rewriting the proprietary ECI.INI does, and it
-	carries its dictionary inside the library rather than as .dic files.
+	needs none of the C:\\dummy\\ rewriting the proprietary ECI.INI does.
+
+	``dataDirectory`` is cleared deliberately, and it is a real feature gap rather
+	than a tidy-up: openevv's eciLoadDict rejects the pronunciation dictionaries
+	the add-on ships and the ones users add, so a custom dictionary only takes
+	effect on the Eloquence Host Process backend.  See _load_dictionaries().
 	"""
 	payload = dict(payload)
 	payload["eciPath"] = openevv_engine_path()

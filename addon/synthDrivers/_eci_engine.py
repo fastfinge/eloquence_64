@@ -297,8 +297,13 @@ class EciEngine:
 	def _load_dictionaries(self) -> None:
 		language_code = (self._config.language_code or "enu").lower()
 		if not self._config.data_directory or not os.path.isdir(self._config.data_directory):
-			# openevv carries its own dictionary inside the library; there is no
-			# separate directory of .dic files to load.
+			# No directory of .dic files to load.  This is how the in-process
+			# openevv backend runs: measured against openevv v0.3, eciLoadDict
+			# returns 6 (failure) for every dictionary file the proprietary engine
+			# accepts with 0, so external dictionaries simply do not work there.
+			# Calling it repeatedly anyway was also observed to leave the engine in
+			# a state where eciDelete raised an access violation, so the add-on
+			# does not call it at all rather than call it and ignore the result.
 			return
 		dictionary_dir = get_short_path(self._config.data_directory)
 		dictionary_candidates = get_dictionary_candidates(language_code)

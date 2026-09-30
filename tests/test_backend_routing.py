@@ -246,6 +246,69 @@ class MixedLanguageOrderingTests(unittest.TestCase):
 		self.assertLess(chunk[3], self.pipeline.sequence)
 
 
+class EngineSelectionDefaultTests(unittest.TestCase):
+	"""The Eloquence Host Process is the default, and stays it on a bad value."""
+
+	def setUp(self):
+		self.module = _load_client_module()
+
+	def _with_conf(self, section):
+		self.module.config.conf = {"eloquence": section} if section is not None else {}
+		return self.module.openevv_enabled()
+
+	def test_a_fresh_install_uses_the_host(self):
+		# No config at all, and a config section that predates the setting.
+		self.assertFalse(self._with_conf(None))
+		self.assertFalse(self._with_conf({}))
+		self.assertFalse(self._with_conf({"dictionary_name": "IBM TTS Dictionaries"}))
+
+	def test_a_real_boolean_is_honoured(self):
+		self.assertTrue(self._with_conf({"use_openevv": True}))
+		self.assertFalse(self._with_conf({"use_openevv": False}))
+
+	def test_a_stringly_typed_false_does_not_enable_it(self):
+		# NVDA stores this section without a confspec, so values come back as
+		# strings.  bool("False") is True, which would have turned the engine on
+		# for someone who had just turned it off.
+		for value in ("False", "false", "FALSE", "no", "off", "0", ""):
+			with self.subTest(value=value):
+				self.assertFalse(self._with_conf({"use_openevv": value}))
+
+	def test_a_stringly_typed_true_does_enable_it(self):
+		for value in ("True", "true", "yes", "on", "1", " True "):
+			with self.subTest(value=value):
+				self.assertTrue(self._with_conf({"use_openevv": value}))
+
+	def test_an_unrecognised_value_falls_back_to_the_host(self):
+		for value in ("maybe", "2", None):
+			with self.subTest(value=value):
+				self.assertFalse(self._with_conf({"use_openevv": value}))
+
+
+class OpenevvDictionaryGapTests(unittest.TestCase):
+	"""openevv rejects external dictionaries, so it is not given a directory."""
+
+	def setUp(self):
+		self.module = _load_client_module()
+
+	def test_the_in_process_payload_carries_no_dictionary_directory(self):
+		# Measured: openevv's eciLoadDict returns 6 for every file the proprietary
+		# engine accepts with 0.  Passing a directory would load nothing and, done
+		# repeatedly, was observed to leave eciDelete raising an access violation.
+		payload = self.module._direct_initialize_payload(
+			{"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
+		)
+		self.assertEqual(payload["dataDirectory"], "")
+		self.assertFalse(payload["rewriteIni"])
+
+	def test_the_host_payload_is_left_with_its_dictionary_directory(self):
+		# _direct_initialize_payload must not mutate the caller's dict: the host is
+		# initialized from the same stored payload and does need its dictionaries.
+		original = {"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
+		self.module._direct_initialize_payload(original)
+		self.assertEqual(original["dataDirectory"], r"C:\dicts")
+
+
 class AudioPipelineSingletonTests(unittest.TestCase):
 	def test_both_client_types_accept_the_shared_pipeline(self):
 		module = _load_client_module()
