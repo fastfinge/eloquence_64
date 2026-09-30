@@ -20,7 +20,9 @@ class FakeDll:
 		self.calls.append(("setDict", handle, dictionary_handle))
 
 	def eciLoadDict(self, handle, dictionary_handle, index, path):
-		self.calls.append(("loadDict", handle, dictionary_handle, index, os.path.basename(path.decode("mbcs"))))
+		self.calls.append(
+			("loadDict", handle, dictionary_handle, index, os.path.basename(path.decode("mbcs")))
+		)
 
 	def eciSetParam(self, handle, param_id, value):
 		self.calls.append(("setParam", handle, param_id, value))

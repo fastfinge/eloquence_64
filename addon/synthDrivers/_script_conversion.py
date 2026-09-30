@@ -54,7 +54,9 @@ def _parse_opencc_table(path):
 			try:
 				key, values = line.split("\t", 1)
 			except ValueError as error:
-				raise ValueError(f"{path.name}:{line_number}: expected tab-separated key and values") from error
+				raise ValueError(
+					f"{path.name}:{line_number}: expected tab-separated key and values"
+				) from error
 			value = values.split(" ", 1)[0]
 			mappings[key] = value
 			max_key_length = max(max_key_length, len(key))

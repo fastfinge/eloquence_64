@@ -157,20 +157,38 @@ class ConfigureLoggingTruncationTests(unittest.TestCase):
 		logging.getLogger().handlers.clear()
 
 	def tearDown(self):
+		self._close_new_handlers()
 		logging.getLogger().handlers = self._saved_handlers
+
+	def _close_new_handlers(self):
+		"""Close handlers configure_logging added, releasing the log file.
+
+		basicConfig() installs a FileHandler that holds eloquence-host.log open,
+		and Windows will not delete a file that still has an open handle.
+		Dropping the handler without closing it leaves the log locked.
+		"""
+		root = logging.getLogger()
+		for handler in root.handlers:
+			if handler not in self._saved_handlers:
+				handler.close()
 
 	def test_log_file_truncated_on_startup(self):
 		with tempfile.TemporaryDirectory() as log_dir:
-			log_path = os.path.join(log_dir, "eloquence-host.log")
-			# Pre-write some stale content
-			with open(log_path, "w") as f:
-				f.write("stale error log from previous session\n" * 100)
-			self.assertGreater(os.path.getsize(log_path), 0)
+			try:
+				log_path = os.path.join(log_dir, "eloquence-host.log")
+				# Pre-write some stale content
+				with open(log_path, "w") as f:
+					f.write("stale error log from previous session\n" * 100)
+				self.assertGreater(os.path.getsize(log_path), 0)
 
-			# Reconfigure — should truncate
-			host.configure_logging(log_dir)
-			# The file should now be empty (no errors logged yet at level ERROR)
-			self.assertEqual(os.path.getsize(log_path), 0)
+				# Reconfigure — should truncate
+				host.configure_logging(log_dir)
+				# The file should now be empty (no errors logged yet at level ERROR)
+				self.assertEqual(os.path.getsize(log_path), 0)
+			finally:
+				# Has to happen before TemporaryDirectory removes the file, and
+				# still has to happen when an assertion above fails.
+				self._close_new_handlers()
 
 	def test_log_file_without_dir(self):
 		# Must not crash when log_dir is None
