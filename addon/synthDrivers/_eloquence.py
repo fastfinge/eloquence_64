@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from . import _eci_engine as _engine
 from . import _eloquence_ipc as _ipc
 from . import _eloquence_job as _job
 
@@ -39,20 +40,16 @@ HOST_EXIT_TIMEOUT = 3.0
 
 # Audio handling -----------------------------------------------------------------
 class AudioWorker(threading.Thread):
-	_CHANNELS = 1
-	_BITS_PER_SAMPLE = 16
-	_SAMPLE_RATE = 11025
-
 	def __init__(
 		self,
 		player: nvwave.WavePlayer,
 		queue: "queue.Queue[Optional[AudioChunk]]",
-		client: "EloquenceHostClient",
+		pipeline: "AudioPipeline",
 	):
 		super().__init__(daemon=True)
 		self._player = player
 		self._queue = queue
-		self._client = client
+		self._pipeline = pipeline
 		self._running = True
 		self._stopping = False
 		self._player_lock = threading.RLock()
@@ -67,9 +64,9 @@ class AudioWorker(threading.Thread):
 			if chunk is None:
 				break
 			data, index, is_final, seq = chunk
-			if pending_audio and pending_audio[3] < self._client._sequence:
+			if pending_audio and pending_audio[3] < self._pipeline.sequence:
 				pending_audio = None
-			if seq < self._client._sequence:
+			if seq < self._pipeline.sequence:
 				self._queue.task_done()
 				continue
 
@@ -190,8 +187,128 @@ class HostProcess:
 	listener: _ipc.PipeListener
 
 
-class EloquenceHostClient:
+class AudioPipeline:
+	"""The one Audio Playback Pipeline every backend feeds.
+
+	There is deliberately a single instance of this even when both backends are
+	live at once, which happens whenever openevv serves English and the Eloquence
+	Host Process serves a language openevv does not have.  Two pipelines would
+	mean two WavePlayers competing for the output device and two Speech
+	Generation counters, so ordering and cancellation both live here instead of
+	in either backend.
+	"""
+
 	def __init__(self) -> None:
+		self.queue: "queue.Queue[Optional[AudioChunk]]" = queue.Queue()
+		self.player: Optional[nvwave.WavePlayer] = None
+		self.worker: Optional[AudioWorker] = None
+		# Speech Generation.  Advanced on every cancellation; Audio Chunks stamped
+		# with an older generation are discarded rather than played.
+		self.sequence = 0
+		self.current_seq = 0
+		self.speaking = False
+		self.stop_lock = threading.RLock()
+
+	# ------------------------------------------------------------------
+	def initialize_audio(self) -> None:
+		if self.player:
+			return
+		if version_year >= 2025:
+			device = config.conf["audio"]["outputDevice"]
+			player = nvwave.WavePlayer(
+				_engine.CHANNELS, _engine.SAMPLE_RATE, _engine.BITS_PER_SAMPLE, outputDevice=device
+			)
+		else:
+			device = config.conf["speech"]["outputDevice"]
+			nvwave.WavePlayer.MIN_BUFFER_MS = 1500
+			player = nvwave.WavePlayer(
+				_engine.CHANNELS,
+				_engine.SAMPLE_RATE,
+				_engine.BITS_PER_SAMPLE,
+				outputDevice=device,
+				buffered=True,
+			)
+		self.player = player
+		self.worker = AudioWorker(player, self.queue, self)
+		self.worker.start()
+
+	# ------------------------------------------------------------------
+	def close_audio(self) -> None:
+		if self.worker:
+			self.worker.stop()
+			self.worker.join(timeout=1)
+			self.worker = None
+		if self.player:
+			try:
+				self.player.close()
+			except Exception:
+				LOGGER.exception("WavePlayer close failed")
+			self.player = None
+
+	# ------------------------------------------------------------------
+	def handle_event(self, event: str, payload: Dict[str, Any]) -> None:
+		if event == "audio":
+			data = payload.get("data", b"")
+			index = payload.get("index")
+			is_final = bool(payload.get("final", False))
+			self.queue.put((data, index, is_final, self.current_seq))
+		elif event == "stopped":
+			# Don't call player.stop() from this thread to avoid race conditions
+			# The stop() method will handle player cleanup properly
+			LOGGER.debug("Engine reported stopped event")
+			self.speaking = False
+		else:
+			LOGGER.debug("Unhandled engine event %s", event)
+
+	# ------------------------------------------------------------------
+	def stop_player(self) -> None:
+		if self.player:
+			try:
+				self.player.stop()
+			except Exception:
+				LOGGER.exception("WavePlayer stop failed")
+
+	def cancel(self) -> None:
+		"""Advance the Speech Generation and silence the device immediately."""
+		self.sequence += 1
+		self.stop_player()
+		self.speaking = False
+
+
+class EngineClient:
+	"""One way of reaching an Eloquence Engine.
+
+	Subclasses provide only transport: how a Host Command gets to an engine and
+	how that engine's events come back.  Everything about what NVDA actually
+	hears belongs to the shared AudioPipeline, so the backends cannot drift
+	apart on any of it.
+	"""
+
+	def __init__(self, pipeline: AudioPipeline) -> None:
+		self.pipeline = pipeline
+
+	@property
+	def started(self) -> bool:
+		raise NotImplementedError
+
+	def ensure_started(self) -> None:
+		raise NotImplementedError
+
+	def send_command(self, command: str, wait: bool = True, **payload: Any) -> Dict[str, Any]:
+		raise NotImplementedError
+
+	def stop(self) -> None:
+		raise NotImplementedError
+
+	def shutdown(self) -> None:
+		raise NotImplementedError
+
+
+class EloquenceHostClient(EngineClient):
+	"""Drives the Eloquence Engine in a 32-bit Eloquence Host Process."""
+
+	def __init__(self, pipeline: AudioPipeline) -> None:
+		super().__init__(pipeline)
 		self._host: Optional[HostProcess] = None
 		# Outlives every Eloquence Host Process we spawn; closed only when NVDA exits.
 		self._job: Optional[_job.HostJob] = None
@@ -199,15 +316,11 @@ class EloquenceHostClient:
 		self._responses: Dict[int, Dict[str, Any]] = {}
 		self._receiver: Optional[threading.Thread] = None
 		self._id_counter = itertools.count(1)
-		self._audio_queue: "queue.Queue[Optional[AudioChunk]]" = queue.Queue()
-		self._player: Optional[nvwave.WavePlayer] = None
-		self._audio_worker: Optional[AudioWorker] = None
-		self._running = threading.Event()
 		self._command_lock = threading.Lock()
-		self._stop_lock = threading.RLock()
-		self._sequence = 0
-		self._current_seq = 0
-		self._speaking = False
+
+	@property
+	def started(self) -> bool:
+		return self._host is not None
 
 	# ------------------------------------------------------------------
 	def ensure_started(self) -> None:
@@ -298,34 +411,6 @@ class EloquenceHostClient:
 		raise RuntimeError("Eloquence helper resources missing from add-on package")
 
 	# ------------------------------------------------------------------
-	def initialize_audio(self) -> None:
-		if self._player:
-			return
-		if version_year >= 2025:
-			device = config.conf["audio"]["outputDevice"]
-			player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device)
-		else:
-			device = config.conf["speech"]["outputDevice"]
-			nvwave.WavePlayer.MIN_BUFFER_MS = 1500
-			player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
-		self._player = player
-		self._audio_worker = AudioWorker(player, self._audio_queue, self)
-		self._audio_worker.start()
-
-	# ------------------------------------------------------------------
-	def close_audio(self) -> None:
-		if self._audio_worker:
-			self._audio_worker.stop()
-			self._audio_worker.join(timeout=1)
-			self._audio_worker = None
-		if self._player:
-			try:
-				self._player.close()
-			except Exception:
-				LOGGER.exception("WavePlayer close failed")
-			self._player = None
-
-	# ------------------------------------------------------------------
 	def _receiver_loop(self) -> None:
 		connection = self._host.connection if self._host else None
 		if connection is None:
@@ -358,36 +443,15 @@ class EloquenceHostClient:
 					self._responses[msg_id] = message
 					event.set()
 			elif msg_type == "event":
-				self._handle_event(message["event"], message.get("payload", {}))
+				self.pipeline.handle_event(message["event"], message.get("payload", {}))
 			else:
 				LOGGER.warning("Unknown message type %s", msg_type)
-
-	def _handle_event(self, event: str, payload: Dict[str, Any]) -> None:
-		if event == "audio":
-			data = payload.get("data", b"")
-			index = payload.get("index")
-			is_final = bool(payload.get("final", False))
-			seq = self._current_seq
-			self._audio_queue.put((data, index, is_final, seq))
-		elif event == "stopped":
-			# Don't call player.stop() from this thread to avoid race conditions
-			# The stop() method will handle player cleanup properly
-			LOGGER.debug("Host reported stopped event")
-			self._speaking = False
-		else:
-			LOGGER.debug("Unhandled host event %s", event)
 
 	# ------------------------------------------------------------------
 	def stop(self) -> None:
 		if not self._host:
 			return
-		self._sequence += 1
-		# Stop local audio player immediately
-		if self._player:
-			try:
-				self._player.stop()
-			except Exception:
-				LOGGER.exception("WavePlayer stop failed")
+		self.pipeline.cancel()
 		# Tell the host to stop without blocking
 		try:
 			self.send_command("stop", wait=False)
@@ -440,14 +504,6 @@ class EloquenceHostClient:
 	def shutdown(self) -> None:
 		if not self._host:
 			return
-		# Stop audio worker first
-		if self._audio_worker:
-			self._audio_worker.stop()
-			self._audio_worker.join(timeout=1)
-			self._audio_worker = None
-		if self._player:
-			self._player.close()
-			self._player = None
 		# Send delete command to host (this will cause receiver to get EOFError)
 		try:
 			self.send_command("delete")
@@ -496,7 +552,133 @@ class EloquenceHostClient:
 		self._host = None
 
 
-_client = EloquenceHostClient()
+class DirectEngineClient(EngineClient):
+	"""Drives an ECI-compatible engine inside NVDA's own process.
+
+	Used for openevv's 64-bit eci.dll, which needs no Eloquence Host Process and
+	no Host Channel.  It speaks the same Host Command protocol as the host
+	backend, executed by the shared EciDispatcher, so both backends answer every
+	command through one implementation.
+
+	Commands run synchronously on the caller's thread.  That is the same shape
+	the host has in practice -- the Eloquence Host Process serves its Host
+	Channel single threaded, so a synthesize() there also blocks until the engine
+	runs dry -- and the Synth Driver side only ever issues them from the
+	EloquenceSynthWorker thread, never NVDA's UI thread.
+	"""
+
+	def __init__(self, pipeline: AudioPipeline, eci_path: str) -> None:
+		super().__init__(pipeline)
+		self._eci_path = eci_path
+		self._dispatcher: Optional[_engine.EciDispatcher] = None
+		self._command_lock = threading.RLock()
+		# Set by stop() on NVDA's thread, acted on by the next command on the
+		# synthesis worker, so the engine is only ever touched from one thread.
+		self._reset_pending = False
+
+	@property
+	def started(self) -> bool:
+		return self._dispatcher is not None
+
+	@property
+	def eci_path(self) -> str:
+		return self._eci_path
+
+	def ensure_started(self) -> None:
+		if self._dispatcher is not None:
+			return
+		if not os.path.exists(self._eci_path):
+			raise RuntimeError(f"openevv engine not found at {self._eci_path}")
+		LOGGER.info("Loading the Eloquence Engine in process from %s", self._eci_path)
+		self._dispatcher = _engine.EciDispatcher(self._handle_event_kwargs)
+
+	def _handle_event_kwargs(self, event: str, **payload: Any) -> None:
+		"""Adapt the engine's sink signature to the shared event handler.
+
+		The host backend receives these as a pickled payload dict off the Host
+		Channel; here they arrive as keyword arguments from the engine's own
+		callback, on whichever thread the engine happens to be synthesizing on.
+		"""
+		self.pipeline.handle_event(event, payload)
+
+	def send_command(self, command: str, wait: bool = True, **payload: Any) -> Dict[str, Any]:
+		if self._dispatcher is None:
+			raise RuntimeError("Engine not started")
+		if not self._dispatcher.knows(command):
+			raise RuntimeError("unknownCommand")
+		# The lock serialises commands the way the Eloquence Host Process's single
+		# threaded serve loop does, so a following utterance's addText cannot
+		# reach the engine while the previous synthesize() is still running.
+		with self._command_lock:
+			self._apply_pending_reset()
+			return self._dispatcher.handle(command, payload)
+
+	def stop(self) -> None:
+		if self._dispatcher is None:
+			return
+		# What makes cancellation audible is the same thing that makes it audible
+		# on the host path: the Speech Generation advances, so Audio Chunks already
+		# queued are dropped, and the player is stopped right now.
+		self.pipeline.cancel()
+		# The engine's own reset is only about not carrying state into the next
+		# utterance, so it is left for the next command to perform on the synthesis
+		# worker thread.  Doing it here would either block NVDA waiting for the
+		# command lock that an in-flight synthesize() holds, or need a thread of
+		# its own; both were tried, and every engine call belonging to one thread
+		# is worth more than either.
+		self._reset_pending = True
+
+	def _apply_pending_reset(self) -> None:
+		"""Reset the engine after a cancellation, on the calling worker thread."""
+		if not self._reset_pending:
+			return
+		self._reset_pending = False
+		engine = self._dispatcher.engine if self._dispatcher else None
+		if engine is None:
+			return
+		try:
+			engine.stop()
+		except Exception:
+			LOGGER.exception("Engine reset after cancellation failed")
+
+	def shutdown(self) -> None:
+		if self._dispatcher is None:
+			return
+		try:
+			self.send_command("delete")
+		except Exception:
+			LOGGER.exception("Failed to delete the in-process engine cleanly")
+		self._dispatcher = None
+
+
+def openevv_engine_path() -> str:
+	"""Where fetch_eci.py installs the openevv engine inside the add-on."""
+	return os.path.join(os.path.abspath(os.path.dirname(__file__)), "openevv", "eci.dll")
+
+
+def openevv_version() -> Optional[str]:
+	"""The openevv release the add-on was built against, for the settings panel."""
+	path = os.path.join(os.path.dirname(openevv_engine_path()), "openevv-version.txt")
+	try:
+		with open(path, encoding="utf-8") as f:
+			return f.read().strip() or None
+	except OSError:
+		return None
+
+
+_pipeline = AudioPipeline()
+_client = EloquenceHostClient(_pipeline)
+# Created only when openevv is selected; both backends can be live at once, since
+# openevv serves the languages it has and the host serves the rest.
+_direct_client: Optional[DirectEngineClient] = None
+# The backend the next Host Command goes to.  Switched per fragment by
+# set_voice(), which is the only place a Voice Identity changes.
+_active: EngineClient = _client
+# Voice IDs the in-process engine reported through eciGetAvailableLanguages.
+# Empty means "use the host for everything", so a failed enumeration degrades to
+# today's behaviour rather than to silence.
+_direct_languages: frozenset = frozenset()
+_engine_initialize_payload: Dict[str, Any] = {}
 synth_queue = queue.Queue()
 params: Dict[int, int] = {}
 voice_params: Dict[int, int] = {}
@@ -505,6 +687,124 @@ onIndexReached = None
 _synth_worker: Optional[threading.Thread] = None
 _synth_worker_lock = threading.Lock()
 _synth_worker_stop = threading.Event()
+
+
+# Backend routing ----------------------------------------------------------------
+def openevv_enabled() -> bool:
+	"""Whether the user asked for the in-process openevv engine.
+
+	The Eloquence Host Process is the default, and stays the default for any
+	value this cannot read as an explicit yes.  NVDA stores this section without
+	a confspec, so the value comes back as a string: ``bool("False")`` is True,
+	which would have turned the engine on for a user who had just turned it off.
+	"""
+	raw = config.conf.get("eloquence", {}).get("use_openevv", False)
+	if isinstance(raw, str):
+		return raw.strip().lower() in {"true", "yes", "on", "1"}
+	return bool(raw)
+
+
+def openevv_available() -> bool:
+	return os.path.exists(openevv_engine_path())
+
+
+def direct_languages() -> frozenset:
+	"""Voice IDs the in-process engine can serve, as the engine itself reports them.
+
+	Queried rather than hardcoded so that an openevv release which adds a
+	language starts serving it with no change here.
+	"""
+	return _direct_languages
+
+
+def backend_for_voice(voice_id) -> EngineClient:
+	"""Pick the backend that can speak *voice_id*.
+
+	openevv currently ships US English only, so anything else falls back to the
+	Eloquence Host Process.  The host is started lazily: a user who only ever
+	speaks a language openevv has never pays for the process at all.
+	"""
+	if _direct_client is None:
+		return _client
+	try:
+		numeric_voice = int(voice_id)
+	except (TypeError, ValueError):
+		return _client
+	if numeric_voice in _direct_languages:
+		return _direct_client
+	return _client
+
+
+def current_generation() -> int:
+	"""The Speech Generation to stamp newly queued synthesis work with.
+
+	Public because the Synth Driver needs it when queueing an utterance.  It used
+	to reach into the host client's private counter, which broke silently the
+	moment that counter moved to the shared Audio Playback Pipeline.
+	"""
+	return _pipeline.sequence
+
+
+def voice_uses_direct_backend(voice_id) -> bool:
+	"""Whether *voice_id* will be spoken by the in-process engine.
+
+	The Eloquence Text Builder needs this per fragment, because the openevv
+	bracket workaround must not be applied to text bound for the proprietary
+	engine, which does not have the bug.
+	"""
+	if _direct_client is None:
+		return False
+	return backend_for_voice(voice_id) is _direct_client
+
+
+def _activate(backend: EngineClient) -> None:
+	"""Make *backend* the target of following Host Commands.
+
+	Called on the EloquenceSynthWorker thread, in the order fragments were
+	queued, so switching here is what keeps a mixed-language utterance in
+	order: the outgoing backend has already returned from its synthesize()
+	before the incoming one is given any text.
+	"""
+	global _active
+	if backend is _active:
+		return
+	previous = _active
+	_active = backend
+	LOGGER.debug(
+		"Switching Eloquence backend from %s to %s",
+		type(previous).__name__,
+		type(backend).__name__,
+	)
+	if not backend.started:
+		backend.ensure_started()
+		if _engine_initialize_payload:
+			payload = dict(_engine_initialize_payload)
+			if backend is _direct_client:
+				payload = _direct_initialize_payload(payload)
+			response = backend.send_command("initialize", **payload)
+			params.update(response.get("params", {}))
+			voice_params.update(response.get("voiceParams", {}))
+
+
+def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+	"""Retarget an initialize payload at the in-process openevv engine.
+
+	openevv resolves its own data relative to the DLL and ships an eci.ini that
+	needs none of the C:\\dummy\\ rewriting the proprietary ECI.INI does.
+
+	``dataDirectory`` is cleared deliberately, and it is a real feature gap rather
+	than a tidy-up: openevv's eciLoadDict rejects the pronunciation dictionaries
+	the add-on ships and the ones users add, so a custom dictionary only takes
+	effect on the Eloquence Host Process backend.  See _load_dictionaries().
+	"""
+	payload = dict(payload)
+	payload["eciPath"] = openevv_engine_path()
+	payload["dataDirectory"] = ""
+	payload["rewriteIni"] = False
+	# openevv v0.3's eciStop wedges the engine and then crashes it; see
+	# EciEngine.stop() for the measurements.  Nothing is lost by not calling it.
+	payload["supportsEciStop"] = False
+	return payload
 
 
 # Public API ---------------------------------------------------------------------
@@ -658,13 +958,12 @@ def _sync_eci_ini_paths(eloquence_dir):
 
 
 def initialize(indexCallback=None):
-	global onIndexReached
+	global onIndexReached, _direct_client, _direct_languages, _active, _engine_initialize_payload
 	eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
 	# Repair ECI.INI before the host loads the engine so voices resolve no
 	# matter where this add-on folder was copied from.
 	_sync_eci_ini_paths(os.path.dirname(eci_path))
-	_client.ensure_started()
-	_client.initialize_audio()
+	_pipeline.initialize_audio()
 	_ensure_synth_worker()
 	onIndexReached = indexCallback
 	voice_conf = config.conf.get("speech", {}).get("eci", {})
@@ -676,21 +975,60 @@ def initialize(indexCallback=None):
 		"enablePhrasePrediction": config.conf.get("speech", {}).get("eci", {}).get("phrasePrediction", False),
 		"voiceVariant": int(voice_conf.get("variant", 0) or 0),
 	}
-	response = _client.send_command("initialize", **payload)
+	_engine_initialize_payload = dict(payload)
+
+	# Ask the in-process engine what it can actually speak before routing
+	# anything to it.  An engine that cannot be loaded or enumerated leaves
+	# _direct_languages empty, which routes everything to the host.
+	_direct_client = None
+	_direct_languages = frozenset()
+	if openevv_enabled():
+		if not openevv_available():
+			LOGGER.warning(
+				"openevv was selected but no engine is present at %s; using the "
+				"Eloquence Host Process instead",
+				openevv_engine_path(),
+			)
+		else:
+			languages = _engine.available_languages(openevv_engine_path())
+			if languages:
+				_direct_client = DirectEngineClient(_pipeline, openevv_engine_path())
+				_direct_languages = languages
+				LOGGER.info(
+					"openevv reports %d language(s): %s",
+					len(languages),
+					", ".join(sorted(_engine.LANG_BY_ID.get(i, hex(i)) for i in languages)),
+				)
+			else:
+				LOGGER.warning(
+					"openevv at %s reported no languages; using the Eloquence "
+					"Host Process instead",
+					openevv_engine_path(),
+				)
+
+	# Start on whichever backend owns the configured voice, so an English-only
+	# user never spawns the Eloquence Host Process at all.
+	initial_voice = _engine.LANGS.get(payload["language"], _engine.LANGS["enu"])
+	_active = backend_for_voice(initial_voice)
+	_active.ensure_started()
+	active_payload = payload
+	if _active is _direct_client:
+		active_payload = _direct_initialize_payload(payload)
+	response = _active.send_command("initialize", **active_payload)
 	params.update(response.get("params", {}))
 	voice_params.update(response.get("voiceParams", {}))
 
 
 def speak(text_bytes):
 	try:
-		_client.send_command("addText", text=text_bytes, wait=False)
+		_active.send_command("addText", text=text_bytes, wait=False)
 	except Exception:
 		LOGGER.exception("Failed to send text to synthesizer")
 
 
 def index(idx):
 	try:
-		_client.send_command("insertIndex", value=int(idx), wait=False)
+		_active.send_command("insertIndex", value=int(idx), wait=False)
 	except Exception:
 		LOGGER.exception("Failed to insert index")
 
@@ -718,7 +1056,7 @@ def cmdProsody(pr, multiplier, offset=0):
 
 def synth():
 	try:
-		_client.send_command("synthesize")
+		_active.send_command("synthesize")
 	except Exception:
 		LOGGER.exception("Failed to start synthesis")
 
@@ -727,20 +1065,33 @@ def stop():
 	# NVDA re-sends any still-applicable prosody commands with the next
 	# utterance, so pending temporary prosody dies with the cancelled speech.
 	_active_temp_prosody.clear()
-	_client.stop()
+	# Cancel every backend that is live, not just the active one: a mixed-language
+	# utterance may have left audio queued from the other.
+	for backend in (_client, _direct_client):
+		if backend is not None and backend.started:
+			backend.stop()
 
 
 def pause(switch):
-	if _client._player:
-		_client._player.pause(switch)
+	if _pipeline.player:
+		_pipeline.player.pause(switch)
 
 
 def close_audio():
-	_client.close_audio()
+	_pipeline.close_audio()
 
 
 def terminate():
-	_client.shutdown()
+	global _direct_client, _active
+	_pipeline.close_audio()
+	for backend in (_client, _direct_client):
+		if backend is not None and backend.started:
+			try:
+				backend.shutdown()
+			except Exception:
+				LOGGER.exception("Failed to shut down %s", type(backend).__name__)
+	_direct_client = None
+	_active = _client
 	_stop_synth_worker()
 
 
@@ -754,7 +1105,11 @@ def set_voice(vl):
 		# values, the temporary pitch becomes the new permanent base and the
 		# pitch never reverts -- the "stuck pitch on language change" bug.
 		saved_vparams = dict(voice_params)
-		response = _client.send_command("setParam", paramId=9, value=voice_id)
+		# Route this Voice Identity to whichever backend has it before any
+		# further command is sent.  _activate() starts and initializes the
+		# incoming backend on first use.
+		_activate(backend_for_voice(voice_id))
+		response = _active.send_command("setParam", paramId=9, value=voice_id)
 		params.update(response.get("params", {}))
 		# Do NOT update voice_params from the response.  Instead, restore the
 		# user's base values and push them to the DLL so the new language uses
@@ -762,7 +1117,7 @@ def set_voice(vl):
 		for pr, val in saved_vparams.items():
 			voice_params[pr] = val
 			try:
-				_client.send_command(
+				_active.send_command(
 					"setVoiceParam",
 					paramId=int(pr),
 					value=int(val),
@@ -790,7 +1145,7 @@ def getVParam(pr):
 
 def setVParam(pr, vl, temporary=False):
 	try:
-		response = _client.send_command(
+		response = _active.send_command(
 			"setVoiceParam", paramId=int(pr), value=int(vl), temporary=bool(temporary), wait=False
 		)
 		if not temporary:
@@ -801,10 +1156,19 @@ def setVParam(pr, vl, temporary=False):
 
 def setVariant(v):
 	try:
-		response = _client.send_command("copyVoice", variant=int(v))
+		response = _active.send_command("copyVoice", variant=int(v))
 		voice_params.update(response.get("voiceParams", {}))
 	except Exception:
 		LOGGER.exception("Failed to set variant")
+	# Keep an already-started idle backend in step, so switching language later
+	# does not silently revert the variant the user chose.
+	for backend in (_client, _direct_client):
+		if backend is None or backend is _active or not backend.started:
+			continue
+		try:
+			backend.send_command("copyVoice", variant=int(v))
+		except Exception:
+			LOGGER.exception("Failed to mirror variant onto %s", type(backend).__name__)
 
 
 def process():
@@ -823,10 +1187,10 @@ def _synth_worker_loop() -> None:
 			synth_queue.task_done()
 			break
 		lst, seq = item
-		if seq < _client._sequence:
+		if seq < _pipeline.sequence:
 			synth_queue.task_done()
 			continue
-		_client._current_seq = seq
+		_pipeline.current_seq = seq
 		try:
 			for func, args in lst:
 				try:

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 import host_eloquence32 as host
+from addon.synthDrivers import _eci_engine as engine
 
 
 class FakeDll:
@@ -43,9 +44,13 @@ class RecordingConnection:
 
 
 def make_runtime(data_directory, language_code="enu", conn=None):
-	runtime = host.EloquenceRuntime(
-		conn=conn,
-		config=host.HostConfig(
+	# The engine reports through a sink rather than a transport.  Wiring the real
+	# HostController._send_event in as that sink keeps these tests asserting the
+	# actual Host Channel wire shape instead of a copy of it.
+	sink = host.HostController(conn)._send_event if conn is not None else (lambda *a, **k: None)
+	runtime = engine.EciEngine(
+		sink,
+		config=engine.EngineConfig(
 			eci_path="",
 			data_directory=data_directory,
 			language_code=language_code,
@@ -67,7 +72,7 @@ class SpeechIndexTests(unittest.TestCase):
 		runtime.insert_index(42)
 		runtime._speaking = True
 
-		runtime._on_callback(None, 2, host.FINAL_INDEX, None)
+		runtime._on_callback(None, 2, engine.FINAL_INDEX, None)
 
 		self.assertEqual(
 			connection.messages,
@@ -93,7 +98,7 @@ class SpeechIndexTests(unittest.TestCase):
 		runtime._speaking = True
 
 		runtime._on_callback(None, 2, 42, None)
-		runtime._on_callback(None, 2, host.FINAL_INDEX, None)
+		runtime._on_callback(None, 2, engine.FINAL_INDEX, None)
 
 		self.assertEqual(
 			connection.messages,
@@ -115,7 +120,7 @@ class SpeechIndexTests(unittest.TestCase):
 class DictionaryLoadingTests(unittest.TestCase):
 	def test_dictionary_candidates_do_not_use_generic_fallback_for_non_english(self):
 		self.assertEqual(
-			host.get_dictionary_candidates("esp"),
+			engine.get_dictionary_candidates("esp"),
 			(
 				("espmain.dic",),
 				("esproot.dic",),
@@ -125,7 +130,7 @@ class DictionaryLoadingTests(unittest.TestCase):
 
 	def test_dictionary_candidates_allow_generic_fallback_for_english(self):
 		self.assertEqual(
-			host.get_dictionary_candidates("eng"),
+			engine.get_dictionary_candidates("eng"),
 			(
 				("engmain.dic", "enumain.dic", "main.dic"),
 				("engroot.dic", "enuroot.dic", "root.dic"),
@@ -135,7 +140,7 @@ class DictionaryLoadingTests(unittest.TestCase):
 
 	def test_dictionary_candidates_allow_regional_language_fallbacks(self):
 		self.assertEqual(
-			host.get_dictionary_candidates("esm"),
+			engine.get_dictionary_candidates("esm"),
 			(
 				("esmmain.dic", "espmain.dic"),
 				("esmroot.dic", "esproot.dic"),
@@ -145,7 +150,7 @@ class DictionaryLoadingTests(unittest.TestCase):
 
 	def test_dictionary_candidates_allow_english_fallback_for_chinese(self):
 		self.assertEqual(
-			host.get_dictionary_candidates("chs"),
+			engine.get_dictionary_candidates("chs"),
 			(
 				("chsmain.dic", "enumain.dic", "main.dic"),
 				("chsroot.dic", "enuroot.dic", "root.dic"),
@@ -173,12 +178,12 @@ class DictionaryLoadingTests(unittest.TestCase):
 
 			runtime = make_runtime(data_directory, "enu")
 			runtime._load_dictionaries()
-			runtime.set_param(9, host.LANGS["esp"])
+			runtime.set_param(9, engine.LANGS["esp"])
 
 		self.assertIn(("loadDict", "eci", "dict-1", 0, "enumain.dic"), runtime._dll.calls)
 		self.assertIn(("loadDict", "eci", "dict-2", 0, "espmain.dic"), runtime._dll.calls)
 		self.assertLess(
-			runtime._dll.calls.index(("setParam", "eci", 9, host.LANGS["esp"])),
+			runtime._dll.calls.index(("setParam", "eci", 9, engine.LANGS["esp"])),
 			runtime._dll.calls.index(("newDict", "eci", "dict-2")),
 		)
 

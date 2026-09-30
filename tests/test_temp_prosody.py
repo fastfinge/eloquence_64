@@ -51,6 +51,7 @@ class _FakeClient:
 		self.commands = []
 		self._sequence = 0
 		self._player = None
+		self.started = True
 
 	def send_command(self, command, wait=True, **payload):
 		self.commands.append((command, payload))
@@ -68,7 +69,11 @@ DEU = 262144
 class TempProsodyAcrossVoiceSwitchTests(unittest.TestCase):
 	def setUp(self):
 		self.client = _FakeClient()
+		# Both, because routing sends commands to _active while cancellation
+		# sweeps every started backend.
 		_eloquence._client = self.client
+		_eloquence._active = self.client
+		_eloquence._direct_client = None
 		_eloquence._active_temp_prosody.clear()
 		_eloquence.voice_params.clear()
 		_eloquence.voice_params.update(

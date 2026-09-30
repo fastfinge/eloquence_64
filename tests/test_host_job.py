@@ -86,7 +86,7 @@ class HostJobTests(unittest.TestCase):
 	def test_a_missing_job_does_not_block_startup(self):
 		"""The backstop is best effort; losing it must not break speech."""
 		client_module = _load_module("_eloquence_job_client_test", "_eloquence.py")
-		client = client_module.EloquenceHostClient()
+		client = client_module.EloquenceHostClient(client_module.AudioPipeline())
 		original_create = client_module._job.HostJob.create
 		client_module._job.HostJob.create = staticmethod(lambda: None)
 		try:

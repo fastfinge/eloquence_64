@@ -123,7 +123,16 @@ class _EloquenceStub(types.ModuleType):
 			"kor": (655360, "Korean"),
 		}
 		self.synth_queue = _SpeechQueue()
-		self._client = types.SimpleNamespace(_sequence=1)
+		# Public API only.  This stub used to expose _client._sequence, the private
+		# attribute the driver reached into; when that counter moved to the shared
+		# Audio Playback Pipeline the stub kept the suite green while real NVDA
+		# raised AttributeError on the first utterance.  See
+		# tests/test_driver_module_integration.py.
+		self._generation = 1
+		self.current_generation = lambda: self._generation
+		# These tests cover the proprietary engine's routing, so no fragment goes
+		# to the in-process backend and none gets the openevv bracket workaround.
+		self.voice_uses_direct_backend = lambda voice_id: False
 		self.stopped = False
 		self.processed = False
 		self.immediate_calls = []
