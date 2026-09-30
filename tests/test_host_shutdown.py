@@ -12,6 +12,7 @@ if not hasattr(ctypes, "WINFUNCTYPE"):
 	ctypes.WINFUNCTYPE = ctypes.CFUNCTYPE  # type: ignore[attr-defined]
 
 import host_eloquence32 as host
+from addon.synthDrivers import _eci_engine as engine
 
 
 class FailingConnection:
@@ -56,9 +57,9 @@ class FakeDll:
 
 
 def make_runtime(conn=None):
-	runtime = host.EloquenceRuntime(
-		conn=conn or RecordingConnection(),  # type: ignore[arg-type]
-		config=host.HostConfig(
+	runtime = engine.EciEngine(
+		host.HostController(conn or RecordingConnection())._send_event,
+		config=engine.EngineConfig(
 			eci_path="",
 			data_directory="",
 			language_code="enu",

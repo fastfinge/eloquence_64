@@ -12,7 +12,13 @@ rem even opened the Host Channel, and is also what most antivirus heuristics
 rem flag.  A onedir tree starts from disk with no extraction step.
 rem --noconfirm because --onedir refuses to overwrite a populated dist directory
 rem interactively, which would stall every rebuild after the first.
-call uv run --group host-build --python "%PYTHON32%" --directory "%here%" PyInstaller --onedir --noconfirm --noconsole --name eloquence_host32 host_eloquence32.py
+rem --paths addon\synthDrivers so Analysis can resolve _eci_engine, the ECI wrapper
+rem shared with the Synth Driver side.  PyInstaller does not execute the runtime
+rem sys.path.append in host_eloquence32.py, so without this the frozen host would
+rem build clean and then fail to import the engine on launch.  A copy is baked
+rem into the exe, which is what keeps the two backends on one source file without
+rem requiring 32-bit Python on a user's machine.
+call uv run --group host-build --python "%PYTHON32%" --directory "%here%" PyInstaller --onedir --noconfirm --noconsole --paths addon\synthDrivers --name eloquence_host32 host_eloquence32.py
 if ERRORLEVEL 1 exit /b %ERRORLEVEL%
 rem Replace the previous tree outright so files dropped between builds do not
 rem linger in the packaged add-on.

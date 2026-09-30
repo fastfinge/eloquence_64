@@ -1,14 +1,21 @@
 """32-bit host process for Eloquence synthesis.
 
-This module is executed as a separate helper process under a 32-bit
-    Python runtime.  It loads the ETI-Eloquence DLL directly and exposes a
-simple RPC protocol over a length-prefixed pickle IPC channel so that
-64-bit NVDA builds can continue to make use of the original synthesizer.
+This module is executed as a separate helper process under a 32-bit Python
+runtime.  It exposes a simple RPC protocol over a length-prefixed pickle IPC
+channel so that 64-bit NVDA builds can continue to make use of the original
+synthesizer.
 
-The helper deliberately avoids importing NVDA modules to keep the
-runtime self contained.  All configuration required to load the DLL,
-open dictionaries and select the initial voice is provided by the
-controller process as part of the `initialize` command.
+The engine itself lives in ``_eci_engine``, which is shared verbatim with the
+Synth Driver side so the two backends cannot drift apart.  PyInstaller freezes a
+copy of it into this executable (see the ``--paths`` flag in build_host.cmd), so
+nothing here depends on the add-on being importable at run time.  What remains
+in this module is only what is genuinely process-shaped: the Host Channel, the
+command dispatch and the log file.
+
+The helper deliberately avoids importing NVDA modules to keep the runtime self
+contained.  All configuration required to load the DLL, open dictionaries and
+select the initial voice is provided by the controller process as part of the
+`initialize` command.
 """
 
 from __future__ import annotations
@@ -22,20 +29,14 @@ import sys
 import threading
 import time
 import _winapi
+from typing import Optional
 
+# The engine wrapper is shared with the Synth Driver side.  In a frozen build
+# PyInstaller has already baked it in and this resolves from the archive; in a
+# development checkout it is found through the path added below.
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
-from dataclasses import dataclass
-from io import BytesIO
-from typing import Dict, Optional
-
-import ctypes
-from ctypes import (
-	POINTER,
-	c_int,
-	c_short,
-	c_void_p,
-	cast,
-)
+sys.path.append(os.path.join(os.path.dirname(__file__), "addon", "synthDrivers"))
+from _eci_engine import EciEngine, EngineConfig  # noqa: E402
 
 
 _HEADER_STRUCT = struct.Struct("!I")
@@ -135,93 +136,7 @@ def connect_to_host_channel(name, timeout=10.0):
 		return IpcConnection(handle)
 
 
-def get_short_path(path):
-	"""Returns the 8.3 short path version of a long path, or the original path if it fails."""
-	try:
-		import ctypes
-
-		buf_size = 260
-		while True:
-			buf = ctypes.create_unicode_buffer(buf_size)
-			needed = ctypes.windll.kernel32.GetShortPathNameW(path, buf, buf_size)
-			if needed == 0:
-				return path
-			if needed < buf_size:
-				return buf.value
-			buf_size = needed
-	except Exception:
-		return path
-
-
-# Constants mirrored from the old in-process implementation.
-Callback = ctypes.WINFUNCTYPE(c_int, c_int, c_int, c_int, c_void_p)
-
-# Eloquence parameter identifiers.
-HSZ = 1
-PITCH = 2
-FLUCTUATION = 3
-RGH = 4
-BTH = 5
-RATE = 6
-VLM = 7
-
-# Synthesis state parameters.
-ECI_INPUT_TYPE = 1
-ECI_SYNTH_MODE = 8  # 0=Sentence, 1=Manual
-
-# Size of the Eloquence Engine's PCM output buffer, in 16-bit samples.  The
-# engine fires its audio callback once this many samples are ready, so this sets
-# the granularity of every Audio Chunk on the Host Channel -- and with it the
-# floor on how soon NVDA can start playing an utterance.
-#
-# At the 11025 Hz output rate one Audio Chunk covers
-# OUTPUT_BUFFER_SAMPLES / 11025 seconds: 1100 samples is just under 100 ms,
-# where the previous 3300 was just under 300 ms.  The extra Host Channel traffic
-# is negligible -- framing and unframing a chunk costs about 1.6 us against the
-# ~100 ms of audio it carries -- so the tradeoff is latency against how much
-# slack the Audio Playback Pipeline has to absorb a scheduling hiccup.  Lower
-# this further only alongside testing for underruns on slow machines.
-OUTPUT_BUFFER_SAMPLES = 1100
-
-# A sentinel index value used by Eloquence to mark the end of a chunk.
-FINAL_INDEX = 0xFFFF
-
-LANGS: Dict[str, int] = {
-	"esm": 131073,
-	"esp": 131072,
-	"ptb": 458752,
-	"frc": 196609,
-	"fra": 196608,
-	"fin": 589824,
-	"deu": 262144,
-	"ita": 327680,
-	"enu": 65536,
-	"eng": 65537,
-	"chs": 393216,  # Mandarin Chinese (0x00060000)
-	"jpn": 524288,  # Japanese (0x00080000)
-	"kor": 655360,  # Korean (0x000A0000)
-}
-LANG_BY_ID: Dict[int, str] = {voice_id: language_code for language_code, voice_id in LANGS.items()}
-DICTIONARY_LANGUAGE_FALLBACKS: Dict[str, tuple[str, ...]] = {
-	"eng": ("enu",),
-	"esm": ("esp",),
-	"frc": ("fra",),
-	"chs": ("enu",),
-}
-
 LOGGER = logging.getLogger("eloquence.host")
-
-
-def get_dictionary_candidates(language_code: str) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-	"""Return main/root/abbreviation dictionary candidates for an Eloquence language."""
-	language_code = (language_code or "enu").lower()
-	language_codes = (language_code, *DICTIONARY_LANGUAGE_FALLBACKS.get(language_code, ()))
-	include_generic = any(code in {"enu", "eng"} for code in language_codes)
-	return (
-		(*(f"{code}main.dic" for code in language_codes), *(("main.dic",) if include_generic else ())),
-		(*(f"{code}root.dic" for code in language_codes), *(("root.dic",) if include_generic else ())),
-		(*(f"{code}abbr.dic" for code in language_codes), *(("abbr.dic",) if include_generic else ())),
-	)
 
 
 def configure_logging(log_dir: Optional[str]) -> None:
@@ -246,289 +161,10 @@ def configure_logging(log_dir: Optional[str]) -> None:
 	)
 
 
-@dataclass
-class HostConfig:
-	eci_path: str
-	data_directory: str
-	language_code: str
-	enable_abbrev_dict: bool
-	enable_phrase_prediction: bool
-	voice_variant: int
-
-
-class EloquenceRuntime:
-	"""Wraps access to the 32-bit Eloquence DLL."""
-
-	def __init__(self, conn: IpcConnection, config: HostConfig):
-		self._conn = conn
-		self._config = config
-		self._dll = None  # type: ignore[assignment]
-		self._handle = None  # type: ignore[assignment]
-		self._dictionary_handle = None
-		self._dictionary_handles: Dict[str, object] = {}
-		self._loaded_dictionary_languages: set[str] = set()
-		self._callback = Callback(self._on_callback)
-		self._audio_buffer = BytesIO()
-		self._samples = OUTPUT_BUFFER_SAMPLES
-		# eciSetOutputBuffer expects a pointer to 16-bit PCM samples.  Using a
-		# c_short array keeps the data in the correct format and avoids the
-		# char* semantics of create_string_buffer which truncate at the first
-		# NUL byte when passed as c_char_p.
-		self._buffer = (c_short * self._samples)()
-		self._params: Dict[int, int] = {}
-		self._voice_params: Dict[int, int] = {}
-		self._speaking = False
-		self._saw_final_index = False
-		self._pending_indexes: list[int] = []
-		self._send_disabled = False
-
-	# ------------------------------------------------------------------
-	# Communication helpers
-	def _send_event(self, event: str, **payload: object) -> None:
-		if self._send_disabled:
-			return
-		# LOGGER.debug("Sending event %s", event)
-		try:
-			self._conn.send({"type": "event", "event": event, "payload": payload})
-		except Exception:
-			if not self._send_disabled:
-				self._send_disabled = True
-				LOGGER.error("Failed to send event %s; further sends disabled", event)
-
-	def _send_response(self, msg_id: int, **payload: object) -> None:
-		# LOGGER.debug("Sending response for %s", msg_id)
-		self._conn.send({"type": "response", "id": msg_id, "payload": payload})
-
-	# ------------------------------------------------------------------
-	# Eloquence management
-	def start(self) -> None:
-		# LOGGER.debug("Starting Eloquence runtime")
-		self._load_dll()
-
-	def _load_dll(self) -> None:
-		LOGGER.info("Loading Eloquence library from %s", self._config.eci_path)
-		ini_path = self._config.eci_path[:-3] + "ini"
-		eloquence_dir = os.path.dirname(self._config.eci_path)
-
-		# Read the entire INI file
-		with open(ini_path, "r", encoding="utf-8") as f:
-			ini_content = f.read()
-
-		# Replace C:\dummy\ with the actual eloquence directory
-		# Use short path to avoid encoding issues with legacy DLLs and Python's default encoding
-		short_eloquence_dir = get_short_path(eloquence_dir)
-		updated_content = ini_content.replace("C:\\dummy\\", short_eloquence_dir + "\\")
-
-		# Write the updated content back
-		with open(ini_path, "w", encoding="utf-8") as f:
-			f.write(updated_content)
-		self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
-		self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
-		self._dll.eciRegisterCallback.restype = None
-		self._dll.eciSetOutputBuffer.argtypes = [c_void_p, c_int, POINTER(c_short)]
-		self._dll.eciSetOutputBuffer.restype = c_int
-
-		language_id = LANGS.get(self._config.language_code, LANGS["enu"])
-		# LOGGER.debug("Creating Eloquence handle for language %s -> %s", self._config.language_code, language_id)
-		self._dll.eciNewEx.argtypes = [c_int]
-		self._dll.eciNewEx.restype = c_void_p
-		handle = self._dll.eciNewEx(language_id)
-		if not handle:
-			raise RuntimeError("Failed to create Eloquence handle")
-		self._handle = handle
-		self._dll.eciRegisterCallback(handle, self._callback, None)
-		result = self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer)
-		if not result:
-			raise RuntimeError("eciSetOutputBuffer failed")
-		# Allow annotated input so that backquote commands are interpreted instead of spoken.
-		self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
-		self._params[ECI_INPUT_TYPE] = 1
-		self._params[9] = self._dll.eciGetParam(handle, 9)
-		self._voice_params[RATE] = self._dll.eciGetVoiceParam(handle, 0, RATE)
-		self._voice_params[PITCH] = self._dll.eciGetVoiceParam(handle, 0, PITCH)
-		self._voice_params[VLM] = self._dll.eciGetVoiceParam(handle, 0, VLM)
-		self._voice_params[FLUCTUATION] = self._dll.eciGetVoiceParam(handle, 0, FLUCTUATION)
-		self._load_dictionaries()
-		if self._config.voice_variant:
-			self.copy_voice(self._config.voice_variant)
-		if self._config.enable_phrase_prediction:
-			# LOGGER.debug("Enabling phrase prediction")
-			self._dll.eciSetParam(handle, 42, 1)
-		if self._config.enable_abbrev_dict:
-			# LOGGER.debug("Enabling abbreviation dictionary")
-			self._dll.eciSetParam(handle, 41, 1)
-
-	def _load_dictionaries(self) -> None:
-		language_code = (self._config.language_code or "enu").lower()
-		dictionary_dir = get_short_path(self._config.data_directory)
-		# LOGGER.debug("Loading dictionaries from %s", dictionary_dir)
-		dictionary_candidates = get_dictionary_candidates(language_code)
-		self._dictionary_handle = self._dictionary_handles.get(language_code)
-		if self._dictionary_handle is None:
-			self._dictionary_handle = self._dll.eciNewDict(self._handle)
-			self._dictionary_handles[language_code] = self._dictionary_handle
-
-		if language_code not in self._loaded_dictionary_languages:
-			for index, candidates in enumerate(dictionary_candidates):
-				for candidate in candidates:
-					path = os.path.join(dictionary_dir, candidate)
-					if os.path.exists(path):
-						# LOGGER.debug("Loading dictionary index=%s file=%s", index, path)
-						self._dll.eciLoadDict(
-							self._handle, self._dictionary_handle, index, path.encode("mbcs")
-						)
-						break
-			self._loaded_dictionary_languages.add(language_code)
-		self._dll.eciSetDict(self._handle, self._dictionary_handle)
-
-	# ------------------------------------------------------------------
-	# Public API invoked from the controller
-	def add_text(self, text: bytes) -> None:
-		# LOGGER.debug("Adding %d bytes of text", len(text))
-		self._dll.eciAddText(self._handle, text)
-
-	def insert_index(self, index: int) -> None:
-		# LOGGER.debug("Inserting index %s", index)
-		self._dll.eciInsertIndex(self._handle, index)
-		if index != FINAL_INDEX:
-			self._pending_indexes.append(index)
-
-	def synthesize(self) -> None:
-		# LOGGER.debug("Starting synthesis")
-		self._speaking = True
-		self._saw_final_index = False
-		try:
-			self._dll.eciSynthesize(self._handle)
-			if not self._dll.eciSynchronize(self._handle):
-				LOGGER.warning("eciSynchronize reported failure")
-		finally:
-			self._speaking = False
-			# Ensure any buffered audio is pushed even if the final index was not
-			# delivered (for example if the controller stops early).
-			self._flush_audio()
-			# If no final index was delivered, still emit a final marker so NVDA
-			# receives synthDoneSpeaking (e.g. when there is no text to speak).
-			if not self._saw_final_index:
-				self._report_latest_pending_index()
-				self._send_event("audio", data=b"", index=None, final=True)
-
-	def stop(self) -> None:
-		# LOGGER.debug("Stopping synthesis")
-		self._dll.eciStop(self._handle)
-		self._audio_buffer.seek(0)
-		self._audio_buffer.truncate(0)
-		self._pending_indexes.clear()
-		self._speaking = False
-		self._send_event("stopped")
-
-	def delete(self) -> None:
-		# LOGGER.debug("Deleting Eloquence handle")
-		if self._handle:
-			if self._dll:
-				for dictionary_handle in self._dictionary_handles.values():
-					try:
-						self._dll.eciDeleteDict(self._handle, dictionary_handle)
-					except Exception:
-						LOGGER.exception("Failed to delete Eloquence dictionary")
-			self._dictionary_handles.clear()
-			self._loaded_dictionary_languages.clear()
-			self._dictionary_handle = None
-			self._dll.eciDelete(self._handle)
-			self._handle = None
-
-	def set_param(self, param_id: int, value: int) -> None:
-		# LOGGER.debug("Setting param %s=%s", param_id, value)
-		self._dll.eciSetParam(self._handle, param_id, value)
-		self._params[param_id] = value
-		# When changing voice (param 9), update all voice parameters
-		if param_id == 9:
-			self._config.language_code = LANG_BY_ID.get(value, "enu")
-			self._load_dictionaries()
-			# LOGGER.debug("Voice changed, reading voice parameters")
-			for param in (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH):
-				self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
-
-	def set_voice_param(self, param_id: int, value: int, temporary: bool = False) -> None:
-		# LOGGER.debug("Setting voice param %s=%s temporary=%s", param_id, value, temporary)
-		self._dll.eciSetVoiceParam(self._handle, 0, param_id, value)
-		if not temporary:
-			self._voice_params[param_id] = value
-
-	def copy_voice(self, variant: int) -> None:
-		# LOGGER.debug("Copying voice variant %s", variant)
-		self._dll.eciCopyVoice(self._handle, variant, 0)
-		for param in (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH):
-			self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
-
-	def get_state(self) -> Dict[str, Dict[int, int]]:
-		return {"params": dict(self._params), "voiceParams": dict(self._voice_params)}
-
-	# ------------------------------------------------------------------
-	# Callbacks from Eloquence
-	def _on_callback(self, handle, message, length, user_data):
-		if not self._speaking:
-			return 2
-		# LOGGER.debug("Callback message=%s length=%s", message, length)
-		if message == 0:
-			# Audio data callback - send immediately without buffering
-			data = ctypes.string_at(cast(self._buffer, c_void_p), length * ctypes.sizeof(c_short))
-			# Send this chunk immediately to minimize latency
-			self._send_event("audio", data=data, index=None, final=False)
-		elif message == 2:
-			# Index callback
-			is_final = length == FINAL_INDEX
-			index_value = length if not is_final else None
-			if is_final:
-				self._report_latest_pending_index()
-			else:
-				self._discard_pending_indexes_through(length)
-			# Send empty chunk with index marker
-			self._send_event("audio", data=b"", index=index_value, final=is_final)
-			if is_final:
-				self._saw_final_index = True
-				self._speaking = False
-		return 1
-
-	def _discard_pending_indexes_through(self, index: int) -> None:
-		"""Forget indexes at or before an index reported by the engine.
-
-		NVDA treats an observed later Speech Index as evidence that earlier
-		indexes with no intervening audio were also reached.  Mirroring that rule
-		here prevents an older skipped index from being reported out of order at
-		final completion.
-		"""
-		try:
-			position = self._pending_indexes.index(index)
-		except ValueError:
-			return
-		del self._pending_indexes[: position + 1]
-
-	def _report_latest_pending_index(self) -> None:
-		"""Report the latest index if the engine silently skipped its callback."""
-		if not self._pending_indexes:
-			return
-		index = self._pending_indexes[-1]
-		self._pending_indexes.clear()
-		# Host logging intentionally records errors only.  Treat this protocol
-		# recovery as an error so a silent engine failure leaves diagnostics.
-		LOGGER.error("Eloquence skipped index callback %s; reporting it at completion", index)
-		self._send_event("audio", data=b"", index=index, final=False)
-
-	def _flush_audio(self, index: Optional[int] = None, force: bool = False, final: bool = False) -> None:
-		if self._audio_buffer.tell() == 0:
-			if force or final:
-				self._send_event("audio", data=b"", index=index, final=final)
-			return
-		payload = self._audio_buffer.getvalue()
-		self._audio_buffer.seek(0)
-		self._audio_buffer.truncate(0)
-		self._send_event("audio", data=payload, index=index, final=final)
-
-
 class HostController:
 	def __init__(self, conn: IpcConnection):
 		self._conn = conn
-		self._runtime: Optional[EloquenceRuntime] = None
+		self._runtime: Optional[EciEngine] = None
 		self._should_exit = False
 		self._handlers = {
 			"initialize": self._handle_initialize,
@@ -541,6 +177,15 @@ class HostController:
 			"setVoiceParam": self._handle_set_voice_param,
 			"copyVoice": self._handle_copy_voice,
 		}
+
+	def _send_event(self, event: str, **payload: object) -> None:
+		"""Forward one engine event to the Synth Driver side.
+
+		This is the sink handed to EciEngine.  Failures are raised rather than
+		swallowed: the engine disables further sends after the first one, which is
+		what keeps a closed Host Channel from logging once per Audio Chunk.
+		"""
+		self._conn.send({"type": "event", "event": event, "payload": payload})
 
 	def serve_forever(self) -> None:
 		LOGGER.info("Host controller waiting for commands")
@@ -583,7 +228,7 @@ class HostController:
 	# ------------------------------------------------------------------
 	# Command handlers
 	def _handle_initialize(self, **payload):
-		config = HostConfig(
+		config = EngineConfig(
 			eci_path=payload["eciPath"],
 			data_directory=payload["dataDirectory"],
 			language_code=payload["language"],
@@ -591,7 +236,7 @@ class HostController:
 			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
 			voice_variant=payload.get("voiceVariant", 0),
 		)
-		self._runtime = EloquenceRuntime(self._conn, config)
+		self._runtime = EciEngine(self._send_event, config)
 		self._runtime.start()
 		return self._runtime.get_state()
 
