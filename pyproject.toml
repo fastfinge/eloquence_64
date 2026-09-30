@@ -49,6 +49,13 @@ max-complexity = 15
 # getLanguage import is a side-effect check for NVDA environment detection
 "addon/synthDrivers/_eloquence_updater.py" = ["F401"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The suite imports host_eloquence32, site_scons and addon/ straight from the
+# repo root. "python -m pytest" puts the root on sys.path implicitly, but the
+# "pytest" console script does not, so say so rather than depend on how it is run.
+pythonpath = ["."]
+
 [tool.uv]
 default-groups = "all"
 environments = ["sys_platform == 'win32'"]

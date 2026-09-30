@@ -6,6 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 class _FakeLog:
@@ -71,6 +72,91 @@ def _load_updater():
 		return module
 
 
+def _patch_urlopen(test, module, urlopen):
+	"""The updater shares urllib.request with every other test, so the fake must not outlive this one."""
+	patcher = mock.patch.object(module.urllib.request, "urlopen", urlopen)
+	patcher.start()
+	test.addCleanup(patcher.stop)
+
+
+class _FakeDownloadResponse:
+	"""Yields the given blocks from read(). A block that is an exception is raised instead."""
+
+	def __init__(self, blocks):
+		self.blocks = list(blocks)
+
+	def __enter__(self):
+		return self
+
+	def __exit__(self, exc_type, exc, traceback):
+		return False
+
+	def info(self):
+		return {"Content-Length": "8"}
+
+	def read(self, size):
+		block = self.blocks.pop(0) if self.blocks else b""
+		if isinstance(block, Exception):
+			raise block
+		return block
+
+
+class AddonUpdaterDownloadTests(unittest.TestCase):
+	def setUp(self):
+		self.module = _load_updater()
+		root = tempfile.TemporaryDirectory()
+		self.addCleanup(root.cleanup)
+		self.manager = self.module.EloquenceUpdateManager(os.path.join(root.name, "synthDrivers"))
+		os.makedirs(self.manager.addon_dir)
+		self.timeouts = []
+
+	def serve(self, blocks):
+		def urlopen(req, timeout):
+			self.timeouts.append(timeout)
+			return _FakeDownloadResponse(blocks)
+
+		_patch_urlopen(self, self.module, urlopen)
+
+	def test_download_reports_progress_and_bounds_network_waits(self):
+		self.serve([b"1234", b"5678"])
+		progress = []
+
+		addon_path = self.manager.download_update(
+			"https://example.test/Eloquence.nvda-addon",
+			lambda percent, message: progress.append(percent),
+			lambda: False,
+		)
+
+		with open(addon_path, "rb") as package:
+			self.assertEqual(package.read(), b"12345678")
+		self.assertEqual(progress, [50, 99])
+		self.assertEqual(self.timeouts, [self.module.NETWORK_TIMEOUT_SECONDS])
+
+	def test_cancelled_download_raises_and_removes_the_partial_package(self):
+		self.serve([b"1234", b"5678"])
+		progress = []
+
+		with self.assertRaises(self.module.UpdateCancelled):
+			self.manager.download_update(
+				"https://example.test/Eloquence.nvda-addon",
+				lambda percent, message: progress.append(percent),
+				lambda: bool(progress),
+			)
+
+		self.assertEqual(progress, [50])
+		self.assertFalse(os.path.exists(self.manager.temp_dir))
+
+	def test_failed_download_raises_and_removes_the_partial_package(self):
+		self.serve([b"1234", TimeoutError("timed out")])
+
+		with self.assertRaises(TimeoutError):
+			self.manager.download_update(
+				"https://example.test/Eloquence.nvda-addon", lambda percent, message: None, lambda: False
+			)
+
+		self.assertFalse(os.path.exists(self.manager.temp_dir))
+
+
 class AddonUpdaterInstallTests(unittest.TestCase):
 	def test_check_for_updates_requires_packaged_addon_asset(self):
 		module = _load_updater()
@@ -78,7 +164,7 @@ class AddonUpdaterInstallTests(unittest.TestCase):
 			"tag_name": "v2",
 			"assets": [{"name": "source.zip", "browser_download_url": "https://example.test/source.zip"}],
 		}
-		module.urllib.request.urlopen = lambda req: _FakeUrlResponse(payload)
+		_patch_urlopen(self, module, lambda req, timeout: _FakeUrlResponse(payload))
 
 		with tempfile.TemporaryDirectory() as root:
 			with open(os.path.join(root, "manifest.ini"), "w", encoding="utf-8") as manifest:
@@ -101,7 +187,7 @@ class AddonUpdaterInstallTests(unittest.TestCase):
 				},
 			],
 		}
-		module.urllib.request.urlopen = lambda req: _FakeUrlResponse(payload)
+		_patch_urlopen(self, module, lambda req, timeout: _FakeUrlResponse(payload))
 
 		with tempfile.TemporaryDirectory() as root:
 			with open(os.path.join(root, "manifest.ini"), "w", encoding="utf-8") as manifest:

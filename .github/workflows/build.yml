@@ -41,6 +41,12 @@ jobs:
         run: runlint.bat
         shell: cmd
 
+      # Runs before the proprietary fetch and the build on purpose: nothing in
+      # the suite needs ECI.DLL or the built host, so failures surface early.
+      - name: Unit tests
+        run: runpytest.bat
+        shell: cmd
+
       - name: Install MSYS2 / gettext
         uses: msys2/setup-msys2@v2
         with:
