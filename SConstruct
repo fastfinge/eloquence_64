@@ -39,7 +39,10 @@ for po in poFiles:
 # --- Validate required binaries -------------------------------------------
 
 eci_dir = addonDir / "synthDrivers" / "eloquence"
-host_exe = addonDir / "synthDrivers" / "eloquence_host32.exe"
+# The Eloquence Host Process ships as a PyInstaller onedir tree, so the exe is
+# only runnable alongside the rest of its directory.
+host_dir = addonDir / "synthDrivers" / "eloquence_host32"
+host_exe = host_dir / "eloquence_host32.exe"
 
 required_proprietary = [eci_dir / "ECI.DLL"] + [
 	eci_dir / f"{name}.SYN" for name in ("DEU", "ENG", "ENU", "ESM", "ESP", "FIN", "FRA", "FRC", "ITA", "PTB")
@@ -58,6 +61,14 @@ if missing:
 if not host_exe.exists():
 	print(
 		f"ERROR: {host_exe} not found.\nRun `build_host.cmd` to compile the 32-bit host executable first.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
+if not (host_dir / "_internal").is_dir():
+	print(
+		f"ERROR: {host_dir} has no _internal directory.\n"
+		"It looks like a stale onefile build. Re-run `build_host.cmd`.",
 		file=sys.stderr,
 	)
 	Exit(1)

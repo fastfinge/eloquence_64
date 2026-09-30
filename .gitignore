@@ -16,7 +16,9 @@ addon/synthDrivers/eloquence/FRC.SYN
 addon/synthDrivers/eloquence/ITA.SYN
 addon/synthDrivers/eloquence/PTB.SYN
 
-# Compiled host executable (built from host_eloquence32.py via PyInstaller)
+# Compiled host tree (built from host_eloquence32.py via PyInstaller --onedir)
+addon/synthDrivers/eloquence_host32/
+# Leftover onefile output from before the onedir switch
 addon/synthDrivers/eloquence_host32.exe
 
 # Legacy build artifacts
