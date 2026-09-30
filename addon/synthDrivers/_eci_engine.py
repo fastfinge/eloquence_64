@@ -395,6 +395,15 @@ class EciEngine:
 	# ------------------------------------------------------------------
 	# Callbacks from Eloquence
 	def _on_callback(self, handle, message, length, user_data):
+		# Returning 2 is ECI's "stop synthesizing" answer.  It is only ever
+		# returned here when synthesis is not in flight, and it must stay that
+		# way: measured against openevv v0.3, returning 2 from the audio callback
+		# *during* eciSynchronize segfaults the process, where the proprietary
+		# engine tolerates it.  So an in-flight utterance is never cancelled
+		# through this path.  Cancellation instead advances the Speech Generation
+		# and stops the player, which is also exactly what the Eloquence Host
+		# Process does -- it serves its Host Channel single threaded, so a stop
+		# cannot reach its engine until synthesize() has returned either.
 		if not self._speaking:
 			return 2
 		if message == 0:
@@ -451,3 +460,93 @@ class EciEngine:
 		self._audio_buffer.seek(0)
 		self._audio_buffer.truncate(0)
 		self._send_event("audio", data=payload, index=index, final=final)
+
+
+class EciDispatcher:
+	"""Executes Host Commands against an EciEngine.
+
+	This is the Host Command protocol itself, and both backends run this same
+	code: the Eloquence Host Process reaches it after unpickling a command off
+	the Host Channel, and the Synth Driver side's in-process backend calls it
+	directly.  Keeping one implementation is what stops the two backends
+	answering the same command differently.
+
+	``should_exit`` is set by the ``delete`` command so a transport that owns a
+	process can shut itself down; an in-process caller simply ignores it.
+	"""
+
+	def __init__(self, sink: Callable[..., None]):
+		self._sink = sink
+		self.engine: Optional[EciEngine] = None
+		self.should_exit = False
+		self._handlers = {
+			"initialize": self._handle_initialize,
+			"addText": self._handle_add_text,
+			"insertIndex": self._handle_insert_index,
+			"synthesize": self._handle_synthesize,
+			"stop": self._handle_stop,
+			"delete": self._handle_delete,
+			"setParam": self._handle_set_param,
+			"setVoiceParam": self._handle_set_voice_param,
+			"copyVoice": self._handle_copy_voice,
+		}
+
+	def knows(self, command: str) -> bool:
+		return command in self._handlers
+
+	def handle(self, command: str, payload: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+		handler = self._handlers.get(command)
+		if handler is None:
+			raise KeyError(command)
+		return handler(**(payload or {}))
+
+	# ------------------------------------------------------------------
+	def _handle_initialize(self, **payload):
+		config = EngineConfig(
+			eci_path=payload["eciPath"],
+			data_directory=payload["dataDirectory"],
+			language_code=payload["language"],
+			enable_abbrev_dict=payload.get("enableAbbreviationDict", False),
+			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
+			voice_variant=payload.get("voiceVariant", 0),
+			rewrite_ini=payload.get("rewriteIni", True),
+		)
+		self.engine = EciEngine(self._sink, config)
+		self.engine.start()
+		return self.engine.get_state()
+
+	def _handle_add_text(self, text: bytes):
+		self.engine.add_text(text)
+		return {"status": "ok"}
+
+	def _handle_insert_index(self, value: int):
+		self.engine.insert_index(value)
+		return {"status": "ok"}
+
+	def _handle_synthesize(self):
+		self.engine.synthesize()
+		return {"status": "ok"}
+
+	def _handle_stop(self):
+		self.engine.stop()
+		return {"status": "ok"}
+
+	def _handle_delete(self):
+		if self.engine:
+			self.engine.delete()
+		self.should_exit = True
+		return {"status": "ok"}
+
+	def _handle_set_param(self, paramId: int, value: int):
+		self.engine.set_param(paramId, value)
+		return self.engine.get_state()
+
+	def _handle_set_voice_param(self, paramId: int, value: int, temporary: bool = False):
+		self.engine.set_voice_param(paramId, value, temporary=temporary)
+		if temporary:
+			return {"voiceParams": {paramId: value}}
+		return self.engine.get_state()
+
+	def _handle_copy_voice(self, variant: int):
+		self.engine.copy_voice(variant)
+		return self.engine.get_state()

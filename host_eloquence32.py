@@ -36,7 +36,7 @@ from typing import Optional
 # development checkout it is found through the path added below.
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 sys.path.append(os.path.join(os.path.dirname(__file__), "addon", "synthDrivers"))
-from _eci_engine import EciEngine, EngineConfig  # noqa: E402
+from _eci_engine import EciDispatcher  # noqa: E402
 
 
 _HEADER_STRUCT = struct.Struct("!I")
@@ -162,26 +162,21 @@ def configure_logging(log_dir: Optional[str]) -> None:
 
 
 class HostController:
+	"""Transport for the Host Command protocol.
+
+	The protocol itself lives in EciDispatcher, shared with the Synth Driver
+	side, so this class is only responsible for moving commands and responses
+	across the Host Channel.
+	"""
+
 	def __init__(self, conn: IpcConnection):
 		self._conn = conn
-		self._runtime: Optional[EciEngine] = None
-		self._should_exit = False
-		self._handlers = {
-			"initialize": self._handle_initialize,
-			"addText": self._handle_add_text,
-			"insertIndex": self._handle_insert_index,
-			"synthesize": self._handle_synthesize,
-			"stop": self._handle_stop,
-			"delete": self._handle_delete,
-			"setParam": self._handle_set_param,
-			"setVoiceParam": self._handle_set_voice_param,
-			"copyVoice": self._handle_copy_voice,
-		}
+		self._dispatcher = EciDispatcher(self._send_event)
 
 	def _send_event(self, event: str, **payload: object) -> None:
 		"""Forward one engine event to the Synth Driver side.
 
-		This is the sink handed to EciEngine.  Failures are raised rather than
+		This is the sink handed to the engine.  Failures are raised rather than
 		swallowed: the engine disables further sends after the first one, which is
 		what keeps a closed Host Channel from logging once per Audio Chunk.
 		"""
@@ -189,7 +184,7 @@ class HostController:
 
 	def serve_forever(self) -> None:
 		LOGGER.info("Host controller waiting for commands")
-		while not self._should_exit:
+		while not self._dispatcher.should_exit:
 			try:
 				message = self._conn.recv()
 			except (EOFError, ConnectionError, OSError) as exc:
@@ -204,8 +199,7 @@ class HostController:
 				continue
 			msg_id = message.get("id")
 			command = message.get("command")
-			handler = self._handlers.get(command)
-			if handler is None:
+			if not self._dispatcher.knows(command):
 				LOGGER.error("Unknown command %s", command)
 				try:
 					self._conn.send({"type": "response", "id": msg_id, "error": "unknownCommand"})
@@ -213,10 +207,10 @@ class HostController:
 					LOGGER.error("Failed to send error response for unknown command %s", command)
 				continue
 			try:
-				payload = handler(**message.get("payload", {}))
+				payload = self._dispatcher.handle(command, message.get("payload", {}))
 				self._conn.send({"type": "response", "id": msg_id, "payload": payload})
 				# Exit after sending response to delete command
-				if command == "delete" and self._should_exit:
+				if self._dispatcher.should_exit:
 					break
 			except Exception as exc:
 				LOGGER.exception("Command %s failed", command)
@@ -224,57 +218,6 @@ class HostController:
 					self._conn.send({"type": "response", "id": msg_id, "error": str(exc)})
 				except Exception:
 					LOGGER.error("Failed to send error response for command %s", command)
-
-	# ------------------------------------------------------------------
-	# Command handlers
-	def _handle_initialize(self, **payload):
-		config = EngineConfig(
-			eci_path=payload["eciPath"],
-			data_directory=payload["dataDirectory"],
-			language_code=payload["language"],
-			enable_abbrev_dict=payload.get("enableAbbreviationDict", False),
-			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
-			voice_variant=payload.get("voiceVariant", 0),
-		)
-		self._runtime = EciEngine(self._send_event, config)
-		self._runtime.start()
-		return self._runtime.get_state()
-
-	def _handle_add_text(self, text: bytes):
-		self._runtime.add_text(text)
-		return {"status": "ok"}
-
-	def _handle_insert_index(self, value: int):
-		self._runtime.insert_index(value)
-		return {"status": "ok"}
-
-	def _handle_synthesize(self):
-		self._runtime.synthesize()
-		return {"status": "ok"}
-
-	def _handle_stop(self):
-		self._runtime.stop()
-		return {"status": "ok"}
-
-	def _handle_delete(self):
-		if self._runtime:
-			self._runtime.delete()
-		self._should_exit = True
-		return {"status": "ok"}
-
-	def _handle_set_param(self, paramId: int, value: int):
-		self._runtime.set_param(paramId, value)
-		return self._runtime.get_state()
-
-	def _handle_set_voice_param(self, paramId: int, value: int, temporary: bool = False):
-		self._runtime.set_voice_param(paramId, value, temporary=temporary)
-		if temporary:
-			return {"voiceParams": {paramId: value}}
-		return self._runtime.get_state()
-
-	def _handle_copy_voice(self, variant: int):
-		self._runtime.copy_voice(variant)
-		return self._runtime.get_state()
 
 
 def main() -> None:

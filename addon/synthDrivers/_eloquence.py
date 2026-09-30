@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from . import _eci_engine as _engine
 from . import _eloquence_ipc as _ipc
 from . import _eloquence_job as _job
 
@@ -39,15 +40,11 @@ HOST_EXIT_TIMEOUT = 3.0
 
 # Audio handling -----------------------------------------------------------------
 class AudioWorker(threading.Thread):
-	_CHANNELS = 1
-	_BITS_PER_SAMPLE = 16
-	_SAMPLE_RATE = 11025
-
 	def __init__(
 		self,
 		player: nvwave.WavePlayer,
 		queue: "queue.Queue[Optional[AudioChunk]]",
-		client: "EloquenceHostClient",
+		client: "EngineClient",
 	):
 		super().__init__(daemon=True)
 		self._player = player
@@ -190,8 +187,92 @@ class HostProcess:
 	listener: _ipc.PipeListener
 
 
-class EloquenceHostClient:
+class EngineClient:
+	"""Audio Playback Pipeline and Speech Generation state, shared by both backends.
+
+	Everything that decides what NVDA actually hears -- the Audio Chunk queue,
+	the WavePlayer, the AudioWorker and the Speech Generation counter -- lives
+	here, so the Eloquence Host Process backend and the in-process openevv
+	backend cannot drift apart on any of it.  A subclass supplies only transport:
+	how a Host Command reaches an engine and how that engine's events come back.
+	"""
+
 	def __init__(self) -> None:
+		self._audio_queue: "queue.Queue[Optional[AudioChunk]]" = queue.Queue()
+		self._player: Optional[nvwave.WavePlayer] = None
+		self._audio_worker: Optional[AudioWorker] = None
+		self._running = threading.Event()
+		self._stop_lock = threading.RLock()
+		self._sequence = 0
+		self._current_seq = 0
+		self._speaking = False
+
+	# ------------------------------------------------------------------
+	def initialize_audio(self) -> None:
+		if self._player:
+			return
+		if version_year >= 2025:
+			device = config.conf["audio"]["outputDevice"]
+			player = nvwave.WavePlayer(
+				_engine.CHANNELS, _engine.SAMPLE_RATE, _engine.BITS_PER_SAMPLE, outputDevice=device
+			)
+		else:
+			device = config.conf["speech"]["outputDevice"]
+			nvwave.WavePlayer.MIN_BUFFER_MS = 1500
+			player = nvwave.WavePlayer(
+				_engine.CHANNELS,
+				_engine.SAMPLE_RATE,
+				_engine.BITS_PER_SAMPLE,
+				outputDevice=device,
+				buffered=True,
+			)
+		self._player = player
+		self._audio_worker = AudioWorker(player, self._audio_queue, self)
+		self._audio_worker.start()
+
+	# ------------------------------------------------------------------
+	def close_audio(self) -> None:
+		if self._audio_worker:
+			self._audio_worker.stop()
+			self._audio_worker.join(timeout=1)
+			self._audio_worker = None
+		if self._player:
+			try:
+				self._player.close()
+			except Exception:
+				LOGGER.exception("WavePlayer close failed")
+			self._player = None
+
+	# ------------------------------------------------------------------
+	def _handle_event(self, event: str, payload: Dict[str, Any]) -> None:
+		if event == "audio":
+			data = payload.get("data", b"")
+			index = payload.get("index")
+			is_final = bool(payload.get("final", False))
+			seq = self._current_seq
+			self._audio_queue.put((data, index, is_final, seq))
+		elif event == "stopped":
+			# Don't call player.stop() from this thread to avoid race conditions
+			# The stop() method will handle player cleanup properly
+			LOGGER.debug("Engine reported stopped event")
+			self._speaking = False
+		else:
+			LOGGER.debug("Unhandled engine event %s", event)
+
+	# ------------------------------------------------------------------
+	def _stop_player(self) -> None:
+		if self._player:
+			try:
+				self._player.stop()
+			except Exception:
+				LOGGER.exception("WavePlayer stop failed")
+
+
+class EloquenceHostClient(EngineClient):
+	"""Drives the Eloquence Engine in a 32-bit Eloquence Host Process."""
+
+	def __init__(self) -> None:
+		super().__init__()
 		self._host: Optional[HostProcess] = None
 		# Outlives every Eloquence Host Process we spawn; closed only when NVDA exits.
 		self._job: Optional[_job.HostJob] = None
@@ -199,15 +280,11 @@ class EloquenceHostClient:
 		self._responses: Dict[int, Dict[str, Any]] = {}
 		self._receiver: Optional[threading.Thread] = None
 		self._id_counter = itertools.count(1)
-		self._audio_queue: "queue.Queue[Optional[AudioChunk]]" = queue.Queue()
-		self._player: Optional[nvwave.WavePlayer] = None
-		self._audio_worker: Optional[AudioWorker] = None
-		self._running = threading.Event()
 		self._command_lock = threading.Lock()
-		self._stop_lock = threading.RLock()
-		self._sequence = 0
-		self._current_seq = 0
-		self._speaking = False
+
+	@property
+	def started(self) -> bool:
+		return self._host is not None
 
 	# ------------------------------------------------------------------
 	def ensure_started(self) -> None:
@@ -298,34 +375,6 @@ class EloquenceHostClient:
 		raise RuntimeError("Eloquence helper resources missing from add-on package")
 
 	# ------------------------------------------------------------------
-	def initialize_audio(self) -> None:
-		if self._player:
-			return
-		if version_year >= 2025:
-			device = config.conf["audio"]["outputDevice"]
-			player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device)
-		else:
-			device = config.conf["speech"]["outputDevice"]
-			nvwave.WavePlayer.MIN_BUFFER_MS = 1500
-			player = nvwave.WavePlayer(1, 11025, 16, outputDevice=device, buffered=True)
-		self._player = player
-		self._audio_worker = AudioWorker(player, self._audio_queue, self)
-		self._audio_worker.start()
-
-	# ------------------------------------------------------------------
-	def close_audio(self) -> None:
-		if self._audio_worker:
-			self._audio_worker.stop()
-			self._audio_worker.join(timeout=1)
-			self._audio_worker = None
-		if self._player:
-			try:
-				self._player.close()
-			except Exception:
-				LOGGER.exception("WavePlayer close failed")
-			self._player = None
-
-	# ------------------------------------------------------------------
 	def _receiver_loop(self) -> None:
 		connection = self._host.connection if self._host else None
 		if connection is None:
@@ -362,32 +411,13 @@ class EloquenceHostClient:
 			else:
 				LOGGER.warning("Unknown message type %s", msg_type)
 
-	def _handle_event(self, event: str, payload: Dict[str, Any]) -> None:
-		if event == "audio":
-			data = payload.get("data", b"")
-			index = payload.get("index")
-			is_final = bool(payload.get("final", False))
-			seq = self._current_seq
-			self._audio_queue.put((data, index, is_final, seq))
-		elif event == "stopped":
-			# Don't call player.stop() from this thread to avoid race conditions
-			# The stop() method will handle player cleanup properly
-			LOGGER.debug("Host reported stopped event")
-			self._speaking = False
-		else:
-			LOGGER.debug("Unhandled host event %s", event)
-
 	# ------------------------------------------------------------------
 	def stop(self) -> None:
 		if not self._host:
 			return
 		self._sequence += 1
 		# Stop local audio player immediately
-		if self._player:
-			try:
-				self._player.stop()
-			except Exception:
-				LOGGER.exception("WavePlayer stop failed")
+		self._stop_player()
 		# Tell the host to stop without blocking
 		try:
 			self.send_command("stop", wait=False)
@@ -494,6 +524,118 @@ class EloquenceHostClient:
 				except Exception:
 					pass
 		self._host = None
+
+
+class DirectEngineClient(EngineClient):
+	"""Drives an ECI-compatible engine inside NVDA's own process.
+
+	Used for openevv's 64-bit eci.dll, which needs no Eloquence Host Process and
+	no Host Channel.  It speaks the same Host Command protocol as the host
+	backend, executed by the shared EciDispatcher, so both backends answer every
+	command through one implementation.
+
+	Commands run synchronously on the caller's thread.  That is the same shape
+	the host has in practice -- the Eloquence Host Process serves its Host
+	Channel single threaded, so a synthesize() there also blocks until the engine
+	runs dry -- and the Synth Driver side only ever issues them from the
+	EloquenceSynthWorker thread, never NVDA's UI thread.
+	"""
+
+	def __init__(self, eci_path: str) -> None:
+		super().__init__()
+		self._eci_path = eci_path
+		self._dispatcher: Optional[_engine.EciDispatcher] = None
+		self._command_lock = threading.RLock()
+
+	@property
+	def started(self) -> bool:
+		return self._dispatcher is not None
+
+	@property
+	def eci_path(self) -> str:
+		return self._eci_path
+
+	def ensure_started(self) -> None:
+		if self._dispatcher is not None:
+			return
+		if not os.path.exists(self._eci_path):
+			raise RuntimeError(f"openevv engine not found at {self._eci_path}")
+		LOGGER.info("Loading the Eloquence Engine in process from %s", self._eci_path)
+		self._dispatcher = _engine.EciDispatcher(self._handle_event_kwargs)
+
+	def _handle_event_kwargs(self, event: str, **payload: Any) -> None:
+		"""Adapt the engine's sink signature to the shared event handler.
+
+		The host backend receives these as a pickled payload dict off the Host
+		Channel; here they arrive as keyword arguments from the engine's own
+		callback, on whichever thread the engine happens to be synthesizing on.
+		"""
+		self._handle_event(event, payload)
+
+	def send_command(self, command: str, wait: bool = True, **payload: Any) -> Dict[str, Any]:
+		if self._dispatcher is None:
+			raise RuntimeError("Engine not started")
+		if not self._dispatcher.knows(command):
+			raise RuntimeError("unknownCommand")
+		# The lock serialises commands the way the Eloquence Host Process's single
+		# threaded serve loop does, so a following utterance's addText cannot
+		# reach the engine while the previous synthesize() is still running.
+		with self._command_lock:
+			return self._dispatcher.handle(command, payload)
+
+	def stop(self) -> None:
+		if self._dispatcher is None:
+			return
+		# What makes cancellation feel immediate is the same thing that makes it
+		# immediate on the host path: the Speech Generation advances, so Audio
+		# Chunks already queued are dropped, and the player is stopped now.
+		self._sequence += 1
+		self._stop_player()
+		self._speaking = False
+		engine = self._dispatcher.engine
+		if engine is None:
+			return
+		# eciStop must not run while another thread is inside synthesize(), so it
+		# is deferred onto a thread that waits for the command lock rather than
+		# blocking NVDA here.  The host reaches the same ordering for free by
+		# leaving the stop command queued on the Host Channel until its serve loop
+		# comes back round.
+		threading.Thread(
+			target=self._deferred_stop, args=(engine,), name="EloquenceDirectStop", daemon=True
+		).start()
+
+	def _deferred_stop(self, engine: "_engine.EciEngine") -> None:
+		try:
+			with self._command_lock:
+				if self._dispatcher is not None and self._dispatcher.engine is engine:
+					engine.stop()
+		except Exception:
+			LOGGER.exception("Deferred engine stop failed")
+
+	def shutdown(self) -> None:
+		if self._dispatcher is None:
+			return
+		self.close_audio()
+		try:
+			self.send_command("delete")
+		except Exception:
+			LOGGER.exception("Failed to delete the in-process engine cleanly")
+		self._dispatcher = None
+
+
+def openevv_engine_path() -> str:
+	"""Where fetch_eci.py installs the openevv engine inside the add-on."""
+	return os.path.join(os.path.abspath(os.path.dirname(__file__)), "openevv", "eci.dll")
+
+
+def openevv_version() -> Optional[str]:
+	"""The openevv release the add-on was built against, for the settings panel."""
+	path = os.path.join(os.path.dirname(openevv_engine_path()), "openevv-version.txt")
+	try:
+		with open(path, encoding="utf-8") as f:
+			return f.read().strip() or None
+	except OSError:
+		return None
 
 
 _client = EloquenceHostClient()
