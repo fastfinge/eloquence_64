@@ -16,6 +16,27 @@ Reference measurements, openevv v0.3 against the proprietary ECI.DLL:
 
 With the rewrite applied, openevv's output matches the proprietary engine's to
 within 1.6% on every case above.
+
+Whitespace is not the only thing that separates a bracket from its text, though,
+and the rewrite alone was not enough.  The Pause Policy inserts a backquote
+command before each punctuation mark, ")" included, and it runs *after* this
+rewrite -- so "configuration)" became "configuration `p0)" and openevv named the
+bracket again.  That is what the user heard as "right paren right parenthesis":
+NVDA's own symbol processing supplies the words "right paren", preserving the
+")" after them, and openevv then added its own name for the character.
+
+Measured at 11025 Hz, with the proprietary engine giving 23144 samples for all
+three:
+
+	paren)         openevv 23100   1.00x
+	paren `p0)     openevv 35046   1.51x
+	paren )        openevv 35046   1.51x
+
+So _insert_pause_commands() leaves a closing bracket alone when it is up against
+its text.  Only closing brackets need it: " `p0(letter" measures 1.00x, and an
+opening bracket's text is on the far side of it anyway.  On the real builder
+output for the reported string, openevv and the proprietary engine now agree to
+within 0.1%.
 """
 
 import unittest
@@ -34,7 +55,7 @@ def _options(**overrides):
 		backquote_tags=False,
 		abbreviation_dict=False,
 		phrase_prediction=False,
-		attach_spaced_brackets=True,
+		openevv_bracket_fixes=True,
 	)
 	base.update(overrides)
 	return BuildOptions(**base)
@@ -117,7 +138,7 @@ class BuildIntegrationTests(unittest.TestCase):
 	def test_the_builder_leaves_text_alone_for_the_proprietary_engine(self):
 		# The host path has no bug to work around, and rewriting there would be a
 		# behaviour change for existing users.
-		built = build("( hello )", voice_id=ENU, options=_options(attach_spaced_brackets=False))
+		built = build("( hello )", voice_id=ENU, options=_options(openevv_bracket_fixes=False))
 		self.assertIn(b"( hello )", built)
 
 	def test_raw_backquote_tag_mode_is_never_rewritten(self):
@@ -134,6 +155,74 @@ class BuildIntegrationTests(unittest.TestCase):
 		built = build("( hello )", voice_id=ENU, options=_options())
 		self.assertIn(b"(", built)
 		self.assertIn(b")", built)
+
+
+class PausePolicyInteractionTests(unittest.TestCase):
+	"""The Pause Policy must not re-separate what the rewrite just attached."""
+
+	# What NVDA's symbol processing produces for
+	#   "NVDA Settings: General (normal configuration)"
+	# with brackets at a spoken punctuation level.  A preserved symbol becomes
+	# " <replacement><symbol>", so the ")" survives after the words "right paren"
+	# and it is openevv naming *that* character which doubled the announcement.
+	REPORTED = "NVDA Settings: General  left paren(normal configuration right paren)"
+
+	def test_no_pause_command_is_inserted_before_an_attached_closing_bracket(self):
+		for mode in (0, 2):
+			with self.subTest(pause_mode=mode):
+				built = build(self.REPORTED, voice_id=ENU, options=_options(pause_mode=mode))
+				self.assertIn(b"right paren)", built)
+
+	def test_the_host_still_gets_its_pause_command_there(self):
+		# The proprietary engine is unaffected either way, and dropping the
+		# command for it would be an unrelated prosody change.
+		built = build(
+			self.REPORTED,
+			voice_id=ENU,
+			options=_options(pause_mode=0, openevv_bracket_fixes=False),
+		)
+		self.assertIn(b"right paren `p0)", built)
+
+	def test_other_punctuation_still_gets_its_pause_command(self):
+		# Only closing brackets are skipped; the Pause Policy is otherwise intact.
+		built = build("Settings: done, really. yes", voice_id=ENU, options=_options(pause_mode=0))
+		for expected in (b"`p0:", b"`p0,", b"`p0."):
+			self.assertIn(expected, built)
+
+	def test_a_closing_bracket_standing_alone_keeps_its_pause_command(self):
+		# A bracket with no text to belong to is genuinely being announced, as in
+		# character navigation, so there is nothing to protect and the Pause Policy
+		# is left to do its job.  Both backends get the same bytes here.
+		for text in (")", "( )"):
+			with self.subTest(text=text):
+				for fixes in (True, False):
+					built = build(
+						text, voice_id=ENU, options=_options(pause_mode=0, openevv_bracket_fixes=fixes)
+					)
+					self.assertIn(b"`p0)", built)
+
+	def test_the_bracket_still_reaches_the_engine(self):
+		built = build(self.REPORTED, voice_id=ENU, options=_options(pause_mode=0))
+		self.assertIn(b")", built)
+		self.assertIn(b"(", built)
+
+	def test_pause_mode_one_inserts_nothing_either_way(self):
+		for fixes in (True, False):
+			with self.subTest(openevv_bracket_fixes=fixes):
+				built = build(
+					self.REPORTED,
+					voice_id=ENU,
+					options=_options(pause_mode=1, openevv_bracket_fixes=fixes),
+				)
+				self.assertNotIn(b"`p0", built)
+				self.assertNotIn(b"`p1", built)
+
+	def test_the_two_backends_differ_only_in_that_command(self):
+		host = build(
+			self.REPORTED, voice_id=ENU, options=_options(pause_mode=0, openevv_bracket_fixes=False)
+		)
+		direct = build(self.REPORTED, voice_id=ENU, options=_options(pause_mode=0))
+		self.assertEqual(host.replace(b" `p0)", b")"), direct)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ from . import _text_preprocessing
 pause_re = re.compile(r"([a-zA-Z0-9]|\s)([,.:;?!)])(\2*?)(\s|[\\/]|$|$)")
 time_re = re.compile(r"(\d):(\d+):(\d+)")
 punctuation = b",.?:;)(?!"
+# Closing brackets openevv names when anything at all separates them from the
+# text on their left.  See _insert_pause_commands() and attach_spaced_brackets().
+_CLOSING_BRACKETS = ")]}"
 
 _ENGINE_ENCODINGS = MappingProxyType(
 	{
@@ -40,9 +43,42 @@ class BuildOptions:
 	backquote_tags: bool
 	abbreviation_dict: bool
 	phrase_prediction: bool
-	# Set only for the in-process openevv backend, which mispronounces a bracket
-	# that whitespace separates from its text.  See attach_spaced_brackets().
-	attach_spaced_brackets: bool = False
+	# Set only for the in-process openevv backend, which speaks the *name* of a
+	# bracket that anything separates from its text.  Guards two rewrites: the
+	# whitespace one in attach_spaced_brackets(), and the Pause Policy's command
+	# placement in _insert_pause_commands().
+	openevv_bracket_fixes: bool = False
+
+
+def _insert_pause_commands(text: str, command: str, protect_closing_brackets: bool) -> str:
+	"""Place a Pause Policy command before each punctuation mark.
+
+	``protect_closing_brackets`` skips a closing bracket that is up against the
+	text on its left, because inserting the command there would separate the two
+	and openevv then speaks the bracket's name -- the very thing
+	attach_spaced_brackets() has just finished preventing.  Measured at 11025 Hz
+	against the proprietary engine, which is unaffected either way: "paren)" is
+	1.00x, "paren `p0)" is 1.51x and "paren )" is also 1.51x, all three being
+	23144 samples on the proprietary engine.
+
+	Only closing brackets need this.  An opening bracket is unaffected by a
+	preceding command (" `p0(letter" measures 1.00x), and nothing in the pipeline
+	puts one there today in any case -- but the check is written against a set of
+	brackets rather than ")" alone so that adding one to pause_re cannot
+	reintroduce this quietly.
+
+	A bracket that whitespace still separates from its text keeps its command: it
+	is standing alone, as in character navigation, and being announced is then
+	correct rather than a defect.
+	"""
+
+	def replace(match):
+		prefix, mark, repeats, suffix = match.groups()
+		if protect_closing_brackets and mark in _CLOSING_BRACKETS and not prefix.isspace():
+			return match.group(0)
+		return f"{prefix} {command}{mark}{repeats}{suffix}"
+
+	return pause_re.sub(replace, text)
 
 
 def _engine_encode(text: str, voice_id) -> bytes:
@@ -66,15 +102,15 @@ def build(text: str, voice_id: int, options: BuildOptions) -> bytes:
 	# Before any backquote command is added, so the rewrite only ever sees user
 	# text.  Skipped in raw backquote-tag mode, where the author is addressing the
 	# engine directly and spacing may be deliberate.
-	if options.attach_spaced_brackets and not options.backquote_tags:
+	if options.openevv_bracket_fixes and not options.backquote_tags:
 		text = _text_preprocessing.attach_spaced_brackets(text)
 	if not options.backquote_tags:
 		text = text.replace("`", " ")
 	text = f"`vv{options.volume} {text}"
 	if options.pause_mode == 0:
-		text = pause_re.sub(r"\1 `p0\2\3\4", text)
+		text = _insert_pause_commands(text, "`p0", options.openevv_bracket_fixes)
 	elif options.pause_mode == 2:
-		text = pause_re.sub(r"\1 `p1\2\3\4", text)
+		text = _insert_pause_commands(text, "`p1", options.openevv_bracket_fixes)
 	text = time_re.sub(r"\1:\2 \3", text)
 	text = f"`da{int(options.abbreviation_dict)} {text}"
 	text = f"`pp{int(options.phrase_prediction)} {text}"
