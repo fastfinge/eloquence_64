@@ -57,8 +57,15 @@ jobs:
         run: echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
         shell: pwsh
 
+      # openevv comes from its CI rather than a release until one carries the
+      # eciStop fix, and a CI artifact download needs a token with actions:read
+      # on Mudb0y/openevv.  A workflow's own GITHUB_TOKEN does not carry that
+      # across repositories, so OPENEVV_CI_TOKEN (a PAT) is what actually works;
+      # fetch_eci.py says so explicitly if the download is refused.
       - name: Fetch proprietary files
         run: python fetch_eci.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.OPENEVV_CI_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build 32-bit host
         run: build_host.cmd

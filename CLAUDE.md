@@ -61,7 +61,7 @@ scons.bat
 The add-on can reach an Eloquence Engine two ways, selected by a checkbox in the Eloquence settings category:
 
 - **Eloquence Host Process (32-bit)**: `host_eloquence32.py`, compiled to the `eloquence_host32/` onedir tree. Loads the proprietary `ECI.DLL`, which is 32-bit only, and talks to NVDA over the **Host Channel**. Supports all 13 languages.
-- **Direct Backend (in-process, 64-bit)**: loads openevv's 64-bit `eci.dll` inside NVDA itself. No process, no IPC. openevv v0.3 supports **US English only**.
+- **Direct Backend (in-process, 64-bit)**: loads openevv's 64-bit `eci.dll` inside NVDA itself. No process, no IPC. openevv supports **US English only** so far. The build takes openevv from its CI rather than a release, because v0.3 predates the `eciStop` fix; see `fetch_eci.py`.
 
 Because openevv's language coverage is narrower, both backends can be live at once: a Voice Identity openevv reports is spoken in process, and anything else falls back to the Eloquence Host Process. The available set is read from `eciGetAvailableLanguages` at run time, never hardcoded, so an openevv release that adds a language starts serving it with no code change here. An empty or failed enumeration degrades to host-only rather than to silence.
 
@@ -73,6 +73,8 @@ The Eloquence Host Process is started lazily, so a user who only speaks a langua
 
 - **No NVDA imports** - the Eloquence Host Process has none of them.
 - **No relative imports** - the Synth Driver side imports it as `from . import _eci_engine`, while the frozen host imports it as a top-level `import _eci_engine`.
+
+A third rule is about ctypes rather than packaging, and `tests/test_eci_signatures.py` asserts it: **every ECI entry point called here must have an entry in `ECI_SIGNATURES`**. An ECI handle is a pointer, and a call with no `argtypes` marshals it as a C int - silently truncating a handle above 2 GiB, and on 64-bit raising `int too long to convert` instead. A larger openevv build hit exactly that at `eciSetParam`, having been mapped above the boundary the previous build happened to sit below, with nothing changed on this side.
 
 PyInstaller freezes a copy into the host executable via `--paths addon\synthDrivers` in `build_host.cmd`. Without that flag the host builds clean and then fails to import the engine on launch, because PyInstaller does not execute the runtime `sys.path.append`.
 
@@ -161,7 +163,7 @@ eloquence_64/
 │       ├── openevv/                    # FETCHED by fetch_eci.py (gitignored)
 │       │   ├── eci.dll                 # openevv 64-bit engine, loaded in process
 │       │   ├── eci.ini                 # Needs no rewriting, unlike ECI.INI
-│       │   └── openevv-version.txt     # Which release this build carries
+│       │   └── openevv-version.txt     # Which openevv commit or tag this build carries
 │       └── eloquence/
 │           ├── ECI.DLL                 # PROPRIETARY (gitignored, via fetch_eci.py)
 │           ├── ECI.INI                 # Eloquence config
@@ -184,7 +186,7 @@ eloquence_64/
 When modifying synthesis behavior:
 1. Check if changes belong in the Synth Driver side (`addon/synthDrivers/eloquence.py`) or Eloquence Host Process (`host_eloquence32.py`)
 2. If adding new Host Commands, update both the Synth Driver side (`addon/synthDrivers/_eloquence.py`) and `HostController` handlers
-3. Run `build_host.cmd` after changing `host_eloquence32.py`
+3. Run `build_host.cmd` after changing `host_eloquence32.py` **or `_eci_engine.py`** - PyInstaller freezes a copy of the shared wrapper into the host, so the running host keeps the old one until it is rebuilt
 4. Run `scons.bat` to package changes into the add-on
 
 When debugging IPC issues:
@@ -197,7 +199,8 @@ When debugging IPC issues:
 Known openevv quirks, both measured against the proprietary engine rather than assumed:
 - A bracket separated from its text by whitespace has its *name* spoken (`( x )` runs 2.83x longer than `(x)`; brackets 2.21x, braces 2.00x, double quotes 1.56x). Worked around in `_text_preprocessing.attach_spaced_brackets()`, applied only on the Direct Backend because the proprietary engine does not have the bug. Colons do **not** have it either, despite openevv-nvda 0.1.3 naming them.
 - Returning 2 from the audio callback (ECI's abort) during `eciSynchronize` **segfaults the process**, where the proprietary engine tolerates it. Never cancel an in-flight utterance that way; advance the Speech Generation and stop the player instead, which is what the host path does anyway.
-- **openevv has no usable stop.** `eciStop` on an *idle* engine corrupts it — and a cancellation always finds it idle, because `eciSynthesize` has already drained by then. The second such call leaves the next utterance silent; the third segfaults. During synthesis it is safe but aborts nothing (identical audio length with and without). `eciClearInput` is safe but does not discard queued text. So `EngineConfig.supports_eci_stop=False` for openevv and `eciStop` is never called there; the proprietary engine keeps it. Nothing is lost, because cancellation is carried by the Speech Generation and the player, not the engine. The symptom of getting this wrong is one `Eloquence skipped index callback N` ERROR per cancelled utterance, from a wedged engine that has stopped delivering index callbacks — that log line is deliberately loud and worth keeping.
+- **`eciStop` was unusable on openevv v0.3, and is fine on current main.** On v0.3, `eciStop` on an *idle* engine corrupted it — and a cancellation always finds it idle, because `eciSynthesize` has already drained by then — leaving the next utterance silent and segfaulting on the third call ([openevv#35](https://github.com/Mudb0y/openevv/issues/35)). That is fixed, which is why the build takes openevv from CI rather than from v0.3; the `supports_eci_stop` flag that skipped the call is gone and there is one code path again. `eciClearInput` is still no substitute for discarding queued text: it is safe but does not actually discard it. Cancellation is carried by the Speech Generation and the player, not the engine, so `eciStop` aborting nothing mid-utterance costs nothing. The symptom of a wedged engine is one `Eloquence skipped index callback N` ERROR per cancelled utterance, from an engine that has stopped delivering index callbacks — that log line is deliberately loud and worth keeping.
+- **Pronunciation dictionaries were unusable on v0.3, and work on current main.** `eciLoadDict` returned 6 for every file the proprietary engine accepts with 0, and calling it anyway left `eciDelete` raising an access violation, so `_direct_initialize_payload()` used to clear `dataDirectory`. Re-measured on main@7ee8c572 against the add-on's own ENUmain/ENURoot/ENUabbr: all three load with 0, and the audio matches the proprietary engine sample for sample (`omg` 10472 → 12485, `WWII` 22528 → 14707, `postfixes` 14432 → 14124, an unlisted control unchanged at 11165), over repeated loads and six engine lifecycles. So `dataDirectory` is passed straight through now and both backends honour dictionaries. The 2 MB root dictionary costs ~88 ms once at engine start, against the proprietary engine's ~108 ms.
 - openevv **does** deliver every inserted Speech Index correctly when it is healthy; this was checked against the proprietary engine across seven insertion patterns, and the two agree exactly. An index that goes missing means the engine is wedged, not that indexes are unreliable.
 
 When adding language support:

@@ -28,6 +28,7 @@ import logging
 import os
 from ctypes import (
 	POINTER,
+	c_char_p,
 	c_int,
 	c_short,
 	c_void_p,
@@ -40,6 +41,41 @@ from typing import Callable, Dict, Optional
 LOGGER = logging.getLogger("eloquence.engine")
 
 Callback = ctypes.WINFUNCTYPE(c_int, c_int, c_int, c_int, c_void_p)
+
+# Every ECI entry point this module calls, with its ctypes signature.
+#
+# Declaring these is not tidiness.  An ECI handle is a pointer, and without
+# argtypes ctypes marshals the Python int it has become as a C int: that
+# silently truncates any handle above 2 GiB and, on 64-bit, raises "int too long
+# to convert" outright.  A larger openevv build did exactly that, having been
+# mapped above the boundary the previous one happened to sit below.  Nothing here
+# depends on which engine is loaded -- the proprietary 32-bit DLL is one unlucky
+# allocation away from the same fault -- so tests/test_eci_signatures.py checks
+# that every call site in this module is covered.
+ECI_SIGNATURES = {
+	"eciNewEx": ([c_int], c_void_p),
+	"eciDelete": ([c_void_p], c_void_p),
+	"eciRegisterCallback": ([c_void_p, Callback, c_void_p], None),
+	"eciSetOutputBuffer": ([c_void_p, c_int, POINTER(c_short)], c_int),
+	"eciAddText": ([c_void_p, c_char_p], c_int),
+	"eciInsertIndex": ([c_void_p, c_int], c_int),
+	"eciSynthesize": ([c_void_p], c_int),
+	"eciSynchronize": ([c_void_p], c_int),
+	"eciStop": ([c_void_p], c_int),
+	"eciGetParam": ([c_void_p, c_int], c_int),
+	"eciSetParam": ([c_void_p, c_int, c_int], c_int),
+	"eciGetVoiceParam": ([c_void_p, c_int, c_int], c_int),
+	"eciSetVoiceParam": ([c_void_p, c_int, c_int, c_int], c_int),
+	"eciCopyVoice": ([c_void_p, c_int, c_int], c_int),
+	# A dictionary handle is a pointer in its own right, so it needs the same
+	# treatment as the engine handle.
+	"eciNewDict": ([c_void_p], c_void_p),
+	"eciSetDict": ([c_void_p, c_void_p], c_int),
+	"eciLoadDict": ([c_void_p, c_void_p, c_int, c_char_p], c_int),
+	"eciDeleteDict": ([c_void_p, c_void_p], c_int),
+	# Queried by available_languages() on a freshly loaded library, before any
+	# engine exists, so it is declared there rather than here.
+}
 
 # Eloquence parameter identifiers.
 HSZ = 1
@@ -153,9 +189,6 @@ class EngineConfig:
 	# needs no rewriting, unlike the proprietary engine whose ECI.INI carries
 	# absolute C:\dummy\ placeholders.
 	rewrite_ini: bool = True
-	# Whether eciStop may be called at all.  False for openevv v0.3, where it is
-	# actively destructive -- see EciEngine.stop() for the measurements.
-	supports_eci_stop: bool = True
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -249,14 +282,9 @@ class EciEngine:
 			except (OSError, AttributeError):
 				pass
 		self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
-		self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
-		self._dll.eciRegisterCallback.restype = None
-		self._dll.eciSetOutputBuffer.argtypes = [c_void_p, c_int, POINTER(c_short)]
-		self._dll.eciSetOutputBuffer.restype = c_int
+		self._declare_signatures()
 
 		language_id = LANGS.get(self._config.language_code, LANGS["enu"])
-		self._dll.eciNewEx.argtypes = [c_int]
-		self._dll.eciNewEx.restype = c_void_p
 		handle = self._dll.eciNewEx(language_id)
 		if not handle:
 			raise RuntimeError(
@@ -283,6 +311,20 @@ class EciEngine:
 		if self._config.enable_abbrev_dict:
 			self._dll.eciSetParam(handle, 41, 1)
 
+	def _declare_signatures(self) -> None:
+		"""Give ctypes an argtype for every ECI entry point this module calls."""
+		for name, (argtypes, restype) in ECI_SIGNATURES.items():
+			try:
+				function = getattr(self._dll, name)
+			except AttributeError:
+				# openevv does not export quite everything the proprietary engine
+				# does, and a missing entry point fails loudly at its call site
+				# rather than here, where it would take the whole engine down.
+				LOGGER.info("Eloquence library does not export %s", name)
+				continue
+			function.argtypes = argtypes
+			function.restype = restype
+
 	def _rewrite_ini(self, eloquence_dir: str) -> None:
 		"""Point the proprietary ECI.INI at the real engine directory.
 
@@ -300,13 +342,17 @@ class EciEngine:
 	def _load_dictionaries(self) -> None:
 		language_code = (self._config.language_code or "enu").lower()
 		if not self._config.data_directory or not os.path.isdir(self._config.data_directory):
-			# No directory of .dic files to load.  This is how the in-process
-			# openevv backend runs: measured against openevv v0.3, eciLoadDict
-			# returns 6 (failure) for every dictionary file the proprietary engine
-			# accepts with 0, so external dictionaries simply do not work there.
-			# Calling it repeatedly anyway was also observed to leave the engine in
-			# a state where eciDelete raised an access violation, so the add-on
-			# does not call it at all rather than call it and ignore the result.
+			# No directory of .dic files to load.
+			#
+			# Both backends do load them now.  openevv v0.3 could not: eciLoadDict
+			# returned 6 (failure) for every file the proprietary engine accepts
+			# with 0, and calling it anyway left the engine in a state where
+			# eciDelete raised an access violation.  Measured again on
+			# main@7ee8c572, loading the add-on's own ENUmain/ENURoot/ENUabbr
+			# returns 0 and produces audio identical to the proprietary engine's,
+			# sample for sample, over repeated loads and engine lifecycles.  The
+			# 2 MB root dictionary costs about 88 ms once at engine start, against
+			# the proprietary engine's 108 ms.
 			return
 		dictionary_dir = get_short_path(self._config.data_directory)
 		dictionary_candidates = get_dictionary_candidates(language_code)
@@ -360,25 +406,15 @@ class EciEngine:
 
 		What actually makes cancellation audible is upstream -- the Speech
 		Generation advances and the player is stopped -- so the engine side of this
-		is only about not carrying state into the next utterance.
+		is only about not carrying state into the next utterance.  eciStop itself
+		aborts nothing either way: a cancellation always finds the engine idle,
+		because eciSynthesize has already drained by the time one arrives.
 
-		eciStop is skipped entirely for engines that cannot survive it.  Measured
-		against openevv v0.3: calling eciStop while the engine is idle wedges it,
-		and it is idle whenever a cancellation reaches it, because eciSynthesize
-		has already drained by then.  The second such call leaves the engine
-		producing no audio at all for the next utterance, and the third segfaults
-		the process.  The proprietary engine runs the same sequence ten times over
-		without complaint.  eciClearInput is no substitute: it is safe on openevv
-		but does not actually discard queued text there.
-
-		Nothing is lost by skipping it.  eciStop cannot abort an utterance already
-		being synthesized on openevv either -- measured identical audio length with
-		and without it -- and the Eloquence Host Process is in the same position,
-		since its single-threaded serve loop cannot reach the engine until
-		synthesize() has returned.
+		openevv could not survive this call at all before Mudb0y/openevv#35 was
+		fixed, and the add-on carried a flag to skip it there; see
+		tests/test_engine_cancellation.py for what that was and why it is gone.
 		"""
-		if self._config.supports_eci_stop:
-			self._dll.eciStop(self._handle)
+		self._dll.eciStop(self._handle)
 		self._audio_buffer.seek(0)
 		self._audio_buffer.truncate(0)
 		self._pending_indexes.clear()
@@ -541,7 +577,6 @@ class EciDispatcher:
 			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
 			voice_variant=payload.get("voiceVariant", 0),
 			rewrite_ini=payload.get("rewriteIni", True),
-			supports_eci_stop=payload.get("supportsEciStop", True),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.start()
