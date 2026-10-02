@@ -789,21 +789,19 @@ def _activate(backend: EngineClient) -> None:
 def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""Retarget an initialize payload at the in-process openevv engine.
 
-	openevv resolves its own data relative to the DLL and ships an eci.ini that
-	needs none of the C:\\dummy\\ rewriting the proprietary ECI.INI does.
+	Only two things differ from the host's payload: which library to load, and
+	that openevv resolves its own data relative to that library and ships an
+	eci.ini needing none of the C:\\dummy\\ rewriting the proprietary ECI.INI does.
 
-	``dataDirectory`` is cleared deliberately, and it is a real feature gap rather
-	than a tidy-up: openevv's eciLoadDict rejects the pronunciation dictionaries
-	the add-on ships and the ones users add, so a custom dictionary only takes
-	effect on the Eloquence Host Process backend.  See _load_dictionaries().
+	``dataDirectory`` is passed through unchanged, and deliberately so.  It points
+	at the proprietary engine's directory, where the .dic files live, which is
+	where both backends read them from regardless of which library is loaded.
+	openevv v0.3 could not use them -- see _load_dictionaries() -- but the build
+	no longer ships v0.3.
 	"""
 	payload = dict(payload)
 	payload["eciPath"] = openevv_engine_path()
-	payload["dataDirectory"] = ""
 	payload["rewriteIni"] = False
-	# openevv v0.3's eciStop wedges the engine and then crashes it; see
-	# EciEngine.stop() for the measurements.  Nothing is lost by not calling it.
-	payload["supportsEciStop"] = False
 	return payload
 
 

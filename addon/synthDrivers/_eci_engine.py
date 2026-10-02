@@ -189,9 +189,6 @@ class EngineConfig:
 	# needs no rewriting, unlike the proprietary engine whose ECI.INI carries
 	# absolute C:\dummy\ placeholders.
 	rewrite_ini: bool = True
-	# Whether eciStop may be called at all.  False for openevv v0.3, where it is
-	# actively destructive -- see EciEngine.stop() for the measurements.
-	supports_eci_stop: bool = True
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -345,13 +342,17 @@ class EciEngine:
 	def _load_dictionaries(self) -> None:
 		language_code = (self._config.language_code or "enu").lower()
 		if not self._config.data_directory or not os.path.isdir(self._config.data_directory):
-			# No directory of .dic files to load.  This is how the in-process
-			# openevv backend runs: measured against openevv v0.3, eciLoadDict
-			# returns 6 (failure) for every dictionary file the proprietary engine
-			# accepts with 0, so external dictionaries simply do not work there.
-			# Calling it repeatedly anyway was also observed to leave the engine in
-			# a state where eciDelete raised an access violation, so the add-on
-			# does not call it at all rather than call it and ignore the result.
+			# No directory of .dic files to load.
+			#
+			# Both backends do load them now.  openevv v0.3 could not: eciLoadDict
+			# returned 6 (failure) for every file the proprietary engine accepts
+			# with 0, and calling it anyway left the engine in a state where
+			# eciDelete raised an access violation.  Measured again on
+			# main@7ee8c572, loading the add-on's own ENUmain/ENURoot/ENUabbr
+			# returns 0 and produces audio identical to the proprietary engine's,
+			# sample for sample, over repeated loads and engine lifecycles.  The
+			# 2 MB root dictionary costs about 88 ms once at engine start, against
+			# the proprietary engine's 108 ms.
 			return
 		dictionary_dir = get_short_path(self._config.data_directory)
 		dictionary_candidates = get_dictionary_candidates(language_code)
@@ -405,25 +406,15 @@ class EciEngine:
 
 		What actually makes cancellation audible is upstream -- the Speech
 		Generation advances and the player is stopped -- so the engine side of this
-		is only about not carrying state into the next utterance.
+		is only about not carrying state into the next utterance.  eciStop itself
+		aborts nothing either way: a cancellation always finds the engine idle,
+		because eciSynthesize has already drained by the time one arrives.
 
-		eciStop is skipped entirely for engines that cannot survive it.  Measured
-		against openevv v0.3: calling eciStop while the engine is idle wedges it,
-		and it is idle whenever a cancellation reaches it, because eciSynthesize
-		has already drained by then.  The second such call leaves the engine
-		producing no audio at all for the next utterance, and the third segfaults
-		the process.  The proprietary engine runs the same sequence ten times over
-		without complaint.  eciClearInput is no substitute: it is safe on openevv
-		but does not actually discard queued text there.
-
-		Nothing is lost by skipping it.  eciStop cannot abort an utterance already
-		being synthesized on openevv either -- measured identical audio length with
-		and without it -- and the Eloquence Host Process is in the same position,
-		since its single-threaded serve loop cannot reach the engine until
-		synthesize() has returned.
+		openevv could not survive this call at all before Mudb0y/openevv#35 was
+		fixed, and the add-on carried a flag to skip it there; see
+		tests/test_engine_cancellation.py for what that was and why it is gone.
 		"""
-		if self._config.supports_eci_stop:
-			self._dll.eciStop(self._handle)
+		self._dll.eciStop(self._handle)
 		self._audio_buffer.seek(0)
 		self._audio_buffer.truncate(0)
 		self._pending_indexes.clear()
@@ -586,7 +577,6 @@ class EciDispatcher:
 			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
 			voice_variant=payload.get("voiceVariant", 0),
 			rewrite_ini=payload.get("rewriteIni", True),
-			supports_eci_stop=payload.get("supportsEciStop", True),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.start()

@@ -171,9 +171,9 @@ class BackendActivationTests(unittest.TestCase):
 		self.module._activate(self.module.backend_for_voice(ENU))
 		_command, payload = self.direct.commands[0]
 		self.assertTrue(payload["eciPath"].lower().endswith("openevv\\eci.dll"))
-		# openevv resolves its own data and carries its dictionary inside the
-		# library, so there is no .dic directory and no ini to rewrite.
-		self.assertEqual(payload["dataDirectory"], "")
+		# openevv ships an eci.ini that needs no rewriting, but it reads .dic files
+		# from the same directory the host does, so that is passed through.
+		self.assertEqual(payload["dataDirectory"], "C:\\")
 		self.assertFalse(payload["rewriteIni"])
 
 	def test_switching_backend_is_a_no_op_when_it_is_already_active(self):
@@ -285,41 +285,37 @@ class EngineSelectionDefaultTests(unittest.TestCase):
 				self.assertFalse(self._with_conf({"use_openevv": value}))
 
 
-class OpenevvDictionaryGapTests(unittest.TestCase):
-	"""openevv rejects external dictionaries, so it is not given a directory."""
+class DirectInitializePayloadTests(unittest.TestCase):
+	"""What the in-process backend changes about an initialize payload, and what not."""
 
 	def setUp(self):
 		self.module = _load_client_module()
 
-	def test_the_in_process_payload_disables_eci_stop(self):
-		# openevv v0.3's eciStop wedges the engine on the second cancellation and
-		# crashes it on the third; see tests/test_engine_cancellation.py.
-		payload = self.module._direct_initialize_payload(
-			{"eciPath": "x", "dataDirectory": "", "language": "enu"}
-		)
-		self.assertFalse(payload["supportsEciStop"])
-
-	def test_the_host_payload_leaves_eci_stop_enabled(self):
-		# The proprietary engine tolerates it and the host path relies on it.
-		payload = {"eciPath": "x", "dataDirectory": "y", "language": "enu"}
-		self.assertNotIn("supportsEciStop", payload)
-
-	def test_the_in_process_payload_carries_no_dictionary_directory(self):
-		# Measured: openevv's eciLoadDict returns 6 for every file the proprietary
-		# engine accepts with 0.  Passing a directory would load nothing and, done
-		# repeatedly, was observed to leave eciDelete raising an access violation.
+	def test_the_dictionary_directory_is_passed_through(self):
+		# It was cleared while openevv v0.3 was what shipped, because its
+		# eciLoadDict returned 6 for every file the proprietary engine accepts with
+		# 0.  Measured on main@7ee8c572: the add-on's own dictionaries load with 0
+		# and change the audio exactly as they do on the proprietary engine, so
+		# clearing this would now be throwing a working feature away.
 		payload = self.module._direct_initialize_payload(
 			{"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
 		)
-		self.assertEqual(payload["dataDirectory"], "")
+		self.assertEqual(payload["dataDirectory"], r"C:\dicts")
+
+	def test_the_engine_path_and_ini_handling_are_retargeted(self):
+		payload = self.module._direct_initialize_payload(
+			{"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
+		)
+		self.assertNotEqual(payload["eciPath"], r"C:\eci.dll")
 		self.assertFalse(payload["rewriteIni"])
 
-	def test_the_host_payload_is_left_with_its_dictionary_directory(self):
-		# _direct_initialize_payload must not mutate the caller's dict: the host is
-		# initialized from the same stored payload and does need its dictionaries.
+	def test_the_callers_payload_is_not_mutated(self):
+		# The host is initialized from the same stored payload and must still see
+		# its own eciPath and ECI.INI rewriting.
 		original = {"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
 		self.module._direct_initialize_payload(original)
-		self.assertEqual(original["dataDirectory"], r"C:\dicts")
+		self.assertEqual(original["eciPath"], r"C:\eci.dll")
+		self.assertNotIn("rewriteIni", original)
 
 
 class DirectCancellationTests(unittest.TestCase):
