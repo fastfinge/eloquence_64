@@ -534,6 +534,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		BooleanDriverSetting("phrasePrediction", _("Enable phras&e prediction"), False),
 		# Translators: A synth setting available in speech settings dialog
 		DriverSetting("pauseMode", _("Shorten &pauses"), defaultVal="0"),
+		# Translators: A synth setting available in speech settings dialog
+		DriverSetting("sampleRate", _("Sample &rate"), defaultVal="11025"),
 	)
 	supportedCommands = {
 		IndexCommand,
@@ -818,6 +820,40 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	def _get_availablePausemodes(self):
 		return self._pauseModes
+
+	def _get_availableSamplerates(self):
+		"""The output rates the engines in this configuration actually offer.
+
+		The union across backends, not the intersection: an engine that cannot do
+		the chosen rate runs at its own best one and the Audio Playback Pipeline
+		follows whichever is speaking.  So with openevv selected the higher rates
+		are listed even though the proprietary engine tops out at 11025 -- picking
+		one costs a brief gap when an utterance crosses backends, which only
+		happens when a language openevv lacks appears mid-sentence.
+
+		Nothing is hardcoded here; see _eloquence.supported_sample_rates().
+		"""
+		rates = OrderedDict()
+		for rate in _eloquence.supported_sample_rates():
+			# Translators: An option in the "Sample rate" combo box in speech
+			# settings, giving an audio sample rate in hertz.
+			rates[str(rate)] = StringParameterInfo(str(rate), _("{rate} Hz").format(rate=rate))
+		return rates
+
+	def _get_sampleRate(self):
+		return str(_eloquence.requested_sample_rate())
+
+	def _set_sampleRate(self, val):
+		try:
+			rate = int(val)
+		except (TypeError, ValueError):
+			log.warning("Eloquence: ignoring unusable sample rate %r", val)
+			return
+		# Queued for the synthesis worker rather than applied here, so the engine's
+		# output buffer is never swapped mid-utterance; see
+		# _eloquence.set_sample_rate().  An engine that cannot do this rate runs at
+		# its own best one, which is why nothing is read back to confirm.
+		_eloquence.set_sample_rate(rate)
 
 	def _set_pauseMode(self, val):
 		self._pause_mode = int(val)

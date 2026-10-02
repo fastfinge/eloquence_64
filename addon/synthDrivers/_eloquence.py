@@ -39,6 +39,24 @@ HOST_EXIT_TIMEOUT = 3.0
 
 
 # Audio handling -----------------------------------------------------------------
+class RateChange:
+	"""A request to put the WavePlayer on a new sample rate, queued in order.
+
+	This travels through the Audio Playback Pipeline's queue rather than being
+	applied where it is decided, and that is the whole point: Audio Chunks the
+	previous engine already produced are still queued behind it, and rebuilding
+	the player on the caller's thread would play that tail at the wrong rate.
+	The worker therefore reaches this only once everything queued before it has
+	been fed, which is the same reason ordering and cancellation live in the
+	pipeline rather than in either backend.
+	"""
+
+	__slots__ = ("rate",)
+
+	def __init__(self, rate: int) -> None:
+		self.rate = rate
+
+
 class AudioWorker(threading.Thread):
 	def __init__(
 		self,
@@ -63,6 +81,15 @@ class AudioWorker(threading.Thread):
 				continue
 			if chunk is None:
 				break
+			if isinstance(chunk, RateChange):
+				# Anything held back is older than this request, so it belongs to
+				# the outgoing rate and has to go out before the player changes.
+				if pending_audio:
+					self._feed_audio(*pending_audio[:3])
+					pending_audio = None
+				self._switch_rate(chunk.rate)
+				self._queue.task_done()
+				continue
 			data, index, is_final, seq = chunk
 			if pending_audio and pending_audio[3] < self._pipeline.sequence:
 				pending_audio = None
@@ -97,6 +124,28 @@ class AudioWorker(threading.Thread):
 				if is_final:
 					self._schedule_idle()
 			self._queue.task_done()
+
+	def _switch_rate(self, rate: int) -> None:
+		"""Let queued audio finish, then put a fresh player on the new rate.
+
+		nvwave.WavePlayer takes its rate at construction, so there is nothing to
+		set -- the device has to be reopened.  sync() first, because closing a
+		player with audio still buffered would swallow the tail of whatever the
+		outgoing engine just said.
+		"""
+		if self._stopping:
+			return
+		try:
+			with self._player_lock:
+				if self._player:
+					self._player.sync()
+				player = self._pipeline.rebuild_player(rate)
+				if player is not None:
+					self._player = player
+		except Exception:
+			# A failed rebuild must not take the worker down with it: the old
+			# player is still in hand, so speech continues at the old rate.
+			LOGGER.exception("Could not switch the Audio Playback Pipeline to %d Hz", rate)
 
 	def _feed_audio(self, data: bytes, index: Optional[int], is_final: bool) -> None:
 		"""Feed a real Audio Chunk and attach its Speech Progress Notification."""
@@ -202,6 +251,10 @@ class AudioPipeline:
 		self.queue: "queue.Queue[Optional[AudioChunk]]" = queue.Queue()
 		self.player: Optional[nvwave.WavePlayer] = None
 		self.worker: Optional[AudioWorker] = None
+		# The rate the player is open at, and the last one asked for.  They differ
+		# only while a RateChange is still working its way down the queue.
+		self.rate = _engine.SAMPLE_RATE
+		self._requested_rate = _engine.SAMPLE_RATE
 		# Speech Generation.  Advanced on every cancellation; Audio Chunks stamped
 		# with an older generation are discarded rather than played.
 		self.sequence = 0
@@ -210,27 +263,64 @@ class AudioPipeline:
 		self.stop_lock = threading.RLock()
 
 	# ------------------------------------------------------------------
-	def initialize_audio(self) -> None:
-		if self.player:
-			return
+	def _create_player(self, rate: int) -> nvwave.WavePlayer:
 		if version_year >= 2025:
 			device = config.conf["audio"]["outputDevice"]
-			player = nvwave.WavePlayer(
-				_engine.CHANNELS, _engine.SAMPLE_RATE, _engine.BITS_PER_SAMPLE, outputDevice=device
+			return nvwave.WavePlayer(
+				_engine.CHANNELS, rate, _engine.BITS_PER_SAMPLE, outputDevice=device
 			)
-		else:
-			device = config.conf["speech"]["outputDevice"]
-			nvwave.WavePlayer.MIN_BUFFER_MS = 1500
-			player = nvwave.WavePlayer(
-				_engine.CHANNELS,
-				_engine.SAMPLE_RATE,
-				_engine.BITS_PER_SAMPLE,
-				outputDevice=device,
-				buffered=True,
-			)
-		self.player = player
-		self.worker = AudioWorker(player, self.queue, self)
+		device = config.conf["speech"]["outputDevice"]
+		nvwave.WavePlayer.MIN_BUFFER_MS = 1500
+		return nvwave.WavePlayer(
+			_engine.CHANNELS,
+			rate,
+			_engine.BITS_PER_SAMPLE,
+			outputDevice=device,
+			buffered=True,
+		)
+
+	def initialize_audio(self, rate: Optional[int] = None) -> None:
+		if self.player:
+			return
+		if rate:
+			self.rate = rate
+		self._requested_rate = self.rate
+		self.player = self._create_player(self.rate)
+		self.worker = AudioWorker(self.player, self.queue, self)
 		self.worker.start()
+
+	# ------------------------------------------------------------------
+	def request_rate(self, rate: int) -> None:
+		"""Queue a rate change, in order behind whatever is already queued.
+
+		A no-op when the rate asked for is the one already on its way, which is
+		the common case: every fragment asks, and only a backend switch or a
+		settings change actually differs.
+		"""
+		if not rate or rate == self._requested_rate:
+			return
+		self._requested_rate = rate
+		if self.worker:
+			self.queue.put(RateChange(rate))
+		else:
+			# Nothing is playing yet, so the next player simply opens at it.
+			self.rate = rate
+
+	def rebuild_player(self, rate: int) -> Optional[nvwave.WavePlayer]:
+		"""Reopen the output device at *rate*.  Called only from the worker."""
+		if rate == self.rate and self.player:
+			return self.player
+		previous = self.player
+		player = self._create_player(rate)
+		self.player = player
+		self.rate = rate
+		if previous is not None:
+			try:
+				previous.close()
+			except Exception:
+				LOGGER.exception("WavePlayer close failed while changing sample rate")
+		LOGGER.debug("Audio Playback Pipeline now at %d Hz", rate)
+		return player
 
 	# ------------------------------------------------------------------
 	def close_audio(self) -> None:
@@ -286,6 +376,31 @@ class EngineClient:
 
 	def __init__(self, pipeline: AudioPipeline) -> None:
 		self.pipeline = pipeline
+		# The rate this backend's engine is actually running at, which is not
+		# necessarily the one asked for: an engine runs at the best rate it has at
+		# or below the request, so the proprietary engine answers 44100 with
+		# 11025.  The pipeline follows whichever backend is speaking.
+		self.sample_rate = _engine.SAMPLE_RATE
+		self.supported_sample_rates: tuple = ()
+
+	def absorb_state(self, response: Dict[str, Any]) -> Dict[str, Any]:
+		"""Learn the engine's rate from any response that reports it."""
+		if not isinstance(response, dict):
+			return response
+		rate = response.get("sampleRate")
+		if rate:
+			self.sample_rate = int(rate)
+		supported = response.get("supportedSampleRates")
+		if supported:
+			self.supported_sample_rates = tuple(sorted(int(r) for r in supported))
+		return response
+
+	def set_sample_rate(self, rate: int) -> int:
+		"""Ask this backend's engine for *rate*; return what it settled on."""
+		if not self.started:
+			return self.sample_rate
+		self.absorb_state(self.send_command("setSampleRate", rate=int(rate)))
+		return self.sample_rate
 
 	@property
 	def started(self) -> bool:
@@ -678,6 +793,14 @@ _active: EngineClient = _client
 # Empty means "use the host for everything", so a failed enumeration degrades to
 # today's behaviour rather than to silence.
 _direct_languages: frozenset = frozenset()
+# Output rates openevv reported, enumerated at initialize() so the combo box can
+# list them even while the Direct Backend is still asleep.  The Eloquence Host
+# Process reports its own in its initialize response instead, since nothing on
+# this side can load a 32-bit library to ask.
+_direct_sample_rates: tuple = ()
+# The rate the user asked for, which is not necessarily what any one engine runs
+# at.  See EngineClient.sample_rate.
+_requested_sample_rate: int = _engine.SAMPLE_RATE
 _engine_initialize_payload: Dict[str, Any] = {}
 synth_queue = queue.Queue()
 params: Dict[int, int] = {}
@@ -781,9 +904,16 @@ def _activate(backend: EngineClient) -> None:
 			payload = dict(_engine_initialize_payload)
 			if backend is _direct_client:
 				payload = _direct_initialize_payload(payload)
-			response = backend.send_command("initialize", **payload)
+			response = backend.absorb_state(backend.send_command("initialize", **payload))
 			params.update(response.get("params", {}))
 			voice_params.update(response.get("voiceParams", {}))
+			if _requested_sample_rate != backend.sample_rate:
+				# A backend started before the user picked a rate, or one whose
+				# engine clamps differently from the last one.
+				backend.set_sample_rate(_requested_sample_rate)
+	# Queued behind this backend's own fragments, so the outgoing engine's audio
+	# is fed before the device reopens.  See RateChange.
+	_pipeline.request_rate(backend.sample_rate)
 
 
 def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -957,14 +1087,23 @@ def _sync_eci_ini_paths(eloquence_dir):
 
 def initialize(indexCallback=None):
 	global onIndexReached, _direct_client, _direct_languages, _active, _engine_initialize_payload
+	global _direct_sample_rates, _requested_sample_rate
 	eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
 	# Repair ECI.INI before the host loads the engine so voices resolve no
 	# matter where this add-on folder was copied from.
 	_sync_eci_ini_paths(os.path.dirname(eci_path))
-	_pipeline.initialize_audio()
 	_ensure_synth_worker()
 	onIndexReached = indexCallback
 	voice_conf = config.conf.get("speech", {}).get("eci", {})
+	try:
+		_requested_sample_rate = int(voice_conf.get("sampleRate", _engine.SAMPLE_RATE) or 0)
+	except (TypeError, ValueError):
+		_requested_sample_rate = _engine.SAMPLE_RATE
+	if _requested_sample_rate not in _engine.SAMPLE_RATE_VALUES.values():
+		_requested_sample_rate = _engine.SAMPLE_RATE
+	# Opened at the configured rate rather than the default and corrected after,
+	# so the usual case does not reopen the device during start-up.
+	_pipeline.initialize_audio(_requested_sample_rate)
 	payload = {
 		"eciPath": eci_path,
 		"dataDirectory": os.path.join(os.path.dirname(eci_path)),
@@ -972,6 +1111,7 @@ def initialize(indexCallback=None):
 		"enableAbbreviationDict": config.conf.get("speech", {}).get("eci", {}).get("ABRDICT", False),
 		"enablePhrasePrediction": config.conf.get("speech", {}).get("eci", {}).get("phrasePrediction", False),
 		"voiceVariant": int(voice_conf.get("variant", 0) or 0),
+		"sampleRate": _requested_sample_rate,
 	}
 	_engine_initialize_payload = dict(payload)
 
@@ -980,6 +1120,7 @@ def initialize(indexCallback=None):
 	# _direct_languages empty, which routes everything to the host.
 	_direct_client = None
 	_direct_languages = frozenset()
+	_direct_sample_rates = ()
 	if openevv_enabled():
 		if not openevv_available():
 			LOGGER.warning(
@@ -992,6 +1133,14 @@ def initialize(indexCallback=None):
 			if languages:
 				_direct_client = DirectEngineClient(_pipeline, openevv_engine_path())
 				_direct_languages = languages
+				# Enumerated here rather than when the backend starts, because the
+				# combo box has to list openevv's rates even in a session where
+				# the configured voice keeps the Direct Backend asleep.
+				_direct_sample_rates = _engine.available_sample_rates(openevv_engine_path())
+				LOGGER.info(
+					"openevv offers sample rates: %s",
+					", ".join(str(rate) for rate in _direct_sample_rates) or "none reported",
+				)
 				LOGGER.info(
 					"openevv reports %d language(s): %s",
 					len(languages),
@@ -1012,9 +1161,70 @@ def initialize(indexCallback=None):
 	active_payload = payload
 	if _active is _direct_client:
 		active_payload = _direct_initialize_payload(payload)
-	response = _active.send_command("initialize", **active_payload)
+	response = _active.absorb_state(_active.send_command("initialize", **active_payload))
 	params.update(response.get("params", {}))
 	voice_params.update(response.get("voiceParams", {}))
+	# The engine may have clamped the request, in which case the device has to
+	# follow it rather than the other way round.
+	_pipeline.request_rate(_active.sample_rate)
+
+
+def supported_sample_rates() -> tuple:
+	"""Every output rate some backend in this configuration can produce.
+
+	The union, not the intersection, because an engine that cannot do the chosen
+	rate runs at its own best one and the Audio Playback Pipeline follows it.
+	Nothing is hardcoded: openevv's set is enumerated from the library, and the
+	Eloquence Host Process reports its own when it starts.  Before anything has
+	been asked, the one rate every ECI engine has is the honest answer.
+	"""
+	rates = set(_direct_sample_rates)
+	for client in (_client, _direct_client):
+		if client is not None and client.supported_sample_rates:
+			rates.update(client.supported_sample_rates)
+	return tuple(sorted(rates)) or (_engine.SAMPLE_RATE,)
+
+
+def requested_sample_rate() -> int:
+	return _requested_sample_rate
+
+
+def _apply_sample_rate_on_worker(rate: int) -> None:
+	"""Reconfigure the engines and the device.  Runs on the synthesis worker."""
+	for client in (_client, _direct_client):
+		if client is not None and client.started:
+			client.set_sample_rate(rate)
+	if _active is not None:
+		_pipeline.request_rate(_active.sample_rate)
+
+
+def set_sample_rate(rate: int) -> int:
+	"""Put every live backend on *rate* and follow it with the device.
+
+	Returns the rate asked for, not the one any engine settles on: the engines are
+	reconfigured on the EloquenceSynthWorker thread rather than here.
+
+	That detour is the point.  This is called from NVDA's thread when the setting
+	changes, and changing a rate replaces the engine's PCM output buffer -- which
+	the engine may be writing into at that moment, since the worker could be
+	inside synthesize().  Queueing it behind whatever is already queued means the
+	buffer is only ever swapped between utterances, and on the one thread that is
+	allowed to touch the in-process engine at all.  The device then follows
+	through the Audio Playback Pipeline's own queue; see RateChange.
+	"""
+	global _requested_sample_rate
+	rate = int(rate)
+	if rate not in _engine.SAMPLE_RATE_VALUES.values():
+		LOGGER.warning("Ignoring unknown sample rate %r", rate)
+		return _requested_sample_rate
+	_requested_sample_rate = rate
+	if _engine_initialize_payload:
+		# So a backend that starts later comes up on the chosen rate rather than
+		# the one the session began with.
+		_engine_initialize_payload["sampleRate"] = rate
+	synth_queue.put(([(_apply_sample_rate_on_worker, (rate,))], current_generation()))
+	process()
+	return rate
 
 
 def speak(text_bytes):

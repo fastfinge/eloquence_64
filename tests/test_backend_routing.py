@@ -51,20 +51,51 @@ JPN = 524288
 
 
 class _FakeBackend:
-	"""Records the Host Commands a backend would execute."""
+	"""Records the Host Commands a backend would execute.
 
-	def __init__(self, name, pipeline):
+	Mirrors EngineClient's surface rather than only the parts a given test
+	touches, so the fake cannot quietly diverge from the contract _activate()
+	relies on.
+	"""
+
+	def __init__(self, name, pipeline, sample_rate=11025, supported=(8000, 11025)):
 		self.name = name
 		self.pipeline = pipeline
 		self.commands = []
 		self.started = False
+		self.sample_rate = sample_rate
+		self.supported_sample_rates = tuple(supported)
 
 	def ensure_started(self):
 		self.started = True
 
 	def send_command(self, command, wait=True, **payload):
 		self.commands.append((command, payload))
-		return {"params": {}, "voiceParams": {}}
+		return {
+			"params": {},
+			"voiceParams": {},
+			"sampleRate": self.sample_rate,
+			"supportedSampleRates": self.supported_sample_rates,
+		}
+
+	def absorb_state(self, response):
+		rate = response.get("sampleRate")
+		if rate:
+			self.sample_rate = int(rate)
+		supported = response.get("supportedSampleRates")
+		if supported:
+			self.supported_sample_rates = tuple(sorted(int(r) for r in supported))
+		return response
+
+	def set_sample_rate(self, rate):
+		# An engine runs at the best rate it has at or below the request, which is
+		# what makes the host answer 44100 with 11025.
+		candidates = [r for r in self.supported_sample_rates if r <= int(rate)]
+		self.sample_rate = (
+			max(candidates) if candidates else min(self.supported_sample_rates or (11025,))
+		)
+		self.commands.append(("setSampleRate", {"rate": int(rate)}))
+		return self.sample_rate
 
 	def stop(self):
 		self.pipeline.cancel()

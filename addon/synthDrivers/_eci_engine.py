@@ -107,15 +107,69 @@ ECI_LANGUAGE_PARAM = 9
 # this further only alongside testing for underruns on slow machines.
 OUTPUT_BUFFER_SAMPLES = 1100
 
+
+def output_buffer_samples(rate: int) -> int:
+	"""Samples per Audio Chunk at *rate*, holding the chunk's duration constant.
+
+	OUTPUT_BUFFER_SAMPLES is tuned as a duration rather than a count, so it is
+	scaled with the rate: leaving it fixed would make a chunk 23 ms at 48 kHz and
+	quadruple the callback and Host Channel traffic for no gain.  Scaling by the
+	ratio rather than recomputing from milliseconds keeps 11025 Hz on exactly
+	1100, so nothing moves at the default rate.
+	"""
+	return max(1, round(OUTPUT_BUFFER_SAMPLES * rate / SAMPLE_RATE))
+
+
+def choose_sample_rate(requested: int, supported) -> int:
+	"""The rate an engine should actually run at when *requested* is asked for.
+
+	An engine that cannot do the requested rate runs at its best one below it --
+	the proprietary engine answers a request for 44100 with 11025 -- and the
+	Audio Playback Pipeline follows whichever engine is speaking.  Falling back
+	*downwards* matters: picking a higher rate instead would make every utterance
+	from that engine play slow and low.
+	"""
+	if not supported:
+		return SAMPLE_RATE
+	if requested in supported:
+		return requested
+	lower = [rate for rate in supported if rate < requested]
+	return max(lower) if lower else min(supported)
+
 # A sentinel index value used by Eloquence to mark the end of a chunk.
 FINAL_INDEX = 0xFFFF
 
 # The PCM format every ECI-compatible engine here produces.  The Audio Playback
 # Pipeline is configured from these rather than from constants of its own, so a
-# future engine that differs cannot leave the two out of step.
+# future engine that differs cannot leave the two out of step.  SAMPLE_RATE is
+# the rate every engine supports and starts at; see SAMPLE_RATE_VALUES.
 SAMPLE_RATE = 11025
 CHANNELS = 1
 BITS_PER_SAMPLE = 16
+
+# ECI parameter 5 selects the output sample rate, as an index rather than a rate.
+# The mapping is measured, not taken from a header, and the ordering is odd
+# because openevv appended its additions to IBM's original three:
+#
+#   value  0      1      2      3      4      5      6
+#   Hz     8000   11025  22050  16000  32000  44100  48000
+#
+# What each engine actually accepts differs and is probed at run time by
+# _probe_sample_rates(), never hardcoded -- the proprietary ECI.DLL rejects
+# everything above 11025 with -1, where openevv takes all seven.  Measured
+# against openevv main@7ee8c572: these are genuine rate changes rather than
+# slower speech, confirmed by measuring F0 on a sustained vowel against each
+# claimed rate (103.0-103.9 Hz across all seven, within 0.9%).
+ECI_SAMPLE_RATE = 5
+SAMPLE_RATE_VALUES: Dict[int, int] = {
+	0: 8000,
+	1: 11025,
+	2: 22050,
+	3: 16000,
+	4: 32000,
+	5: 44100,
+	6: 48000,
+}
 
 LANGS: Dict[str, int] = {
 	"esm": 131073,
@@ -189,6 +243,9 @@ class EngineConfig:
 	# needs no rewriting, unlike the proprietary engine whose ECI.INI carries
 	# absolute C:\dummy\ placeholders.
 	rewrite_ini: bool = True
+	# Requested output rate in Hz.  Each engine runs at the nearest rate it
+	# supports at or below this; see choose_sample_rate().
+	sample_rate: int = SAMPLE_RATE
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -221,6 +278,63 @@ def available_languages(dll_path: str) -> frozenset:
 	return frozenset(languages[index] for index in range(reported))
 
 
+def available_sample_rates(dll_path: str) -> tuple:
+	"""Ask an ECI library which output rates it takes, without keeping it loaded.
+
+	The companion to available_languages(), and used for the same reason: the
+	sample-rate combo box is built from what the engines really support rather
+	than from a list in the source, so an openevv release that adds a rate starts
+	offering it with no change here.
+
+	Needs a real engine handle, because the parameter is per engine and the only
+	way to test a value is to offer it (see EciEngine._probe_sample_rates).
+	Returns an empty tuple when the library cannot be loaded or reports nothing,
+	which callers must read as "assume only SAMPLE_RATE".
+	"""
+	handle = None
+	dll = None
+	try:
+		directory = os.path.dirname(os.path.abspath(dll_path))
+		if os.path.isdir(directory):
+			try:
+				os.add_dll_directory(directory)
+			except (OSError, AttributeError):
+				pass
+		dll = ctypes.windll.LoadLibrary(os.path.abspath(dll_path))
+		dll.eciNewEx.argtypes = [c_int]
+		dll.eciNewEx.restype = c_void_p
+		dll.eciSetParam.argtypes = [c_void_p, c_int, c_int]
+		dll.eciSetParam.restype = c_int
+		dll.eciGetParam.argtypes = [c_void_p, c_int]
+		dll.eciGetParam.restype = c_int
+		dll.eciDelete.argtypes = [c_void_p]
+		previous = os.getcwd()
+		if os.path.isdir(directory):
+			os.chdir(directory)
+		try:
+			handle = dll.eciNewEx(LANGS["enu"])
+		finally:
+			os.chdir(previous)
+		if not handle:
+			return ()
+		rates = []
+		for value, rate in SAMPLE_RATE_VALUES.items():
+			if dll.eciSetParam(handle, ECI_SAMPLE_RATE, value) == -1:
+				continue
+			if dll.eciGetParam(handle, ECI_SAMPLE_RATE) == value:
+				rates.append(rate)
+		return tuple(sorted(rates))
+	except Exception:
+		LOGGER.exception("Could not enumerate sample rates from %s", dll_path)
+		return ()
+	finally:
+		if handle and dll is not None:
+			try:
+				dll.eciDelete(handle)
+			except Exception:
+				LOGGER.exception("eciDelete failed after enumerating sample rates")
+
+
 class EciEngine:
 	"""Wraps access to an ECI-compatible Eloquence library.
 
@@ -239,7 +353,9 @@ class EciEngine:
 		self._loaded_dictionary_languages: set = set()
 		self._callback = Callback(self._on_callback)
 		self._audio_buffer = BytesIO()
-		self._samples = OUTPUT_BUFFER_SAMPLES
+		self._sample_rate = config.sample_rate
+		self._supported_sample_rates: Dict[int, int] = {}
+		self._samples = output_buffer_samples(self._sample_rate)
 		# eciSetOutputBuffer expects a pointer to 16-bit PCM samples.  Using a
 		# c_short array keeps the data in the correct format and avoids the
 		# char* semantics of create_string_buffer which truncate at the first
@@ -294,6 +410,10 @@ class EciEngine:
 			)
 		self._handle = handle
 		self._dll.eciRegisterCallback(handle, self._callback, None)
+		self._supported_sample_rates = self._probe_sample_rates()
+		# Before the first eciSetOutputBuffer, so the buffer is sized for the rate
+		# the engine will actually run at.
+		self._sample_rate = self._apply_sample_rate(self._config.sample_rate)
 		result = self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer)
 		if not result:
 			raise RuntimeError("eciSetOutputBuffer failed")
@@ -310,6 +430,65 @@ class EciEngine:
 			self._dll.eciSetParam(handle, 42, 1)
 		if self._config.enable_abbrev_dict:
 			self._dll.eciSetParam(handle, 41, 1)
+
+	def _probe_sample_rates(self) -> Dict[int, int]:
+		"""Ask the engine which rates it takes, as {Hz: ECI parameter value}.
+
+		eciSetParam answers with the parameter's *previous* value, or -1 when it
+		rejects the one offered, which is the only way to tell what an engine
+		supports -- there is no enumeration call for this as there is for
+		languages.  The original value is put back afterwards.
+
+		An engine that does not implement the parameter at all reports nothing
+		here, and the caller then leaves the parameter alone and runs at
+		SAMPLE_RATE.  Degrading to the one rate every engine has beats guessing.
+		"""
+		original = self._dll.eciGetParam(self._handle, ECI_SAMPLE_RATE)
+		supported: Dict[int, int] = {}
+		for value, rate in SAMPLE_RATE_VALUES.items():
+			if self._dll.eciSetParam(self._handle, ECI_SAMPLE_RATE, value) == -1:
+				continue
+			# A silent refusal is still a refusal: trust the read-back, not the
+			# return value.
+			if self._dll.eciGetParam(self._handle, ECI_SAMPLE_RATE) == value:
+				supported[rate] = value
+		if original >= 0:
+			self._dll.eciSetParam(self._handle, ECI_SAMPLE_RATE, original)
+		if not supported:
+			LOGGER.info("Eloquence engine does not report any selectable sample rate")
+		return supported
+
+	def _apply_sample_rate(self, requested: int) -> int:
+		"""Put the engine on the best rate it has for *requested*; return it."""
+		if not self._supported_sample_rates:
+			return SAMPLE_RATE
+		rate = choose_sample_rate(requested, self._supported_sample_rates)
+		self._dll.eciSetParam(self._handle, ECI_SAMPLE_RATE, self._supported_sample_rates[rate])
+		self._params[ECI_SAMPLE_RATE] = self._supported_sample_rates[rate]
+		self._samples = output_buffer_samples(rate)
+		self._buffer = (c_short * self._samples)()
+		return rate
+
+	def set_sample_rate(self, requested: int) -> int:
+		"""Change the output rate between utterances; return the effective one.
+
+		Safe on a live engine -- both engines were measured accepting a change on
+		an existing handle -- but only between utterances: the output buffer is
+		replaced here, and swapping it under a synthesis in flight would hand the
+		engine a buffer it is already writing into.
+		"""
+		rate = self._apply_sample_rate(requested)
+		self._sample_rate = rate
+		if not self._dll.eciSetOutputBuffer(self._handle, self._samples, self._buffer):
+			raise RuntimeError("eciSetOutputBuffer failed")
+		return rate
+
+	@property
+	def sample_rate(self) -> int:
+		return self._sample_rate
+
+	def supported_sample_rates(self) -> tuple:
+		return tuple(sorted(self._supported_sample_rates))
 
 	def _declare_signatures(self) -> None:
 		"""Give ctypes an argtype for every ECI entry point this module calls."""
@@ -456,8 +635,16 @@ class EciEngine:
 		for param in _VOICE_PARAMS:
 			self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
 
-	def get_state(self) -> Dict[str, Dict[int, int]]:
-		return {"params": dict(self._params), "voiceParams": dict(self._voice_params)}
+	def get_state(self) -> Dict[str, object]:
+		return {
+			"params": dict(self._params),
+			"voiceParams": dict(self._voice_params),
+			# The Synth Driver side needs both: the effective rate to configure the
+			# Audio Playback Pipeline, and the supported set to build the combo box
+			# from what the engines really have rather than from a hardcoded list.
+			"sampleRate": self._sample_rate,
+			"supportedSampleRates": self.supported_sample_rates(),
+		}
 
 	# ------------------------------------------------------------------
 	# Callbacks from Eloquence
@@ -556,6 +743,7 @@ class EciDispatcher:
 			"setParam": self._handle_set_param,
 			"setVoiceParam": self._handle_set_voice_param,
 			"copyVoice": self._handle_copy_voice,
+			"setSampleRate": self._handle_set_sample_rate,
 		}
 
 	def knows(self, command: str) -> bool:
@@ -577,9 +765,14 @@ class EciDispatcher:
 			enable_phrase_prediction=payload.get("enablePhrasePrediction", False),
 			voice_variant=payload.get("voiceVariant", 0),
 			rewrite_ini=payload.get("rewriteIni", True),
+			sample_rate=payload.get("sampleRate", SAMPLE_RATE),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.start()
+		return self.engine.get_state()
+
+	def _handle_set_sample_rate(self, rate: int):
+		self.engine.set_sample_rate(int(rate))
 		return self.engine.get_state()
 
 	def _handle_add_text(self, text: bytes):
