@@ -692,7 +692,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		# utterance can cross backends mid-sentence and the proprietary engine must
 		# not get the rewrite.  Both variants are built once here rather than per
 		# fragment.
-		direct_options = dataclasses.replace(options, attach_spaced_brackets=True)
+		direct_options = dataclasses.replace(options, openevv_bracket_fixes=True)
 		sequence_voice = getattr(self, "_defaultVoice", str(_eloquence.params.get(9, 65536)))
 		last_queued_engine_voice = getattr(self, "_lastEngineVoice", None)
 
