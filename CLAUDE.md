@@ -122,6 +122,23 @@ Text handling is entirely on the Synth Driver side - `_eloquence_text.build()` h
 - Speech Generations prevent stale audio after `stop()` calls
 - Speech Progress Notifications fire when audio completes playback
 
+**Sample rate**: selectable, and the one thing the two backends can genuinely differ on. ECI parameter 5 picks the rate as an index, and what each engine accepts is probed at run time (`_eci_engine.available_sample_rates()`), never hardcoded — `eciSetParam` answers with the parameter's *previous* value, or `-1` when it refuses, which is the only way to ask. Measured:
+
+| | 8000 | 11025 | 16000 | 22050 | 32000 | 44100 | 48000 |
+|---|---|---|---|---|---|---|---|
+| proprietary `ECI.DLL` | ✓ | ✓ (default) | — | — | — | — | — |
+| openevv `main@7ee8c572` | ✓ | ✓ (default) | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+These are real rate changes, not slower speech: F0 on a sustained vowel measured against each claimed rate gives 103.0–103.9 Hz across all seven. Both engines also accept a change on a live handle, so no engine rebuild is needed.
+
+The combo box offers the **union**, not the intersection. An engine that cannot do the chosen rate runs at its own best one at or below it (`choose_sample_rate()` — downwards, because running an engine faster than asked plays it slow and low), and the single Audio Playback Pipeline follows whichever backend is speaking. The cost is a brief gap when an utterance crosses backends, which only happens when a language openevv lacks appears mid-sentence.
+
+Two things are load-bearing and easy to undo by accident:
+- **The rate change travels through the pipeline queue** as a `RateChange` item, not applied where it is decided. Audio the outgoing engine already produced is still queued behind it, and reopening the device on the caller's thread would play that tail at the new rate. The worker `sync()`s before closing the old player, or the tail is swallowed instead.
+- **`set_sample_rate()` queues the engine work onto the EloquenceSynthWorker** rather than doing it inline. Changing a rate replaces the engine's PCM output buffer, and the setting changes on NVDA's thread while the worker may be inside `synthesize()`.
+
+`OUTPUT_BUFFER_SAMPLES` is scaled with the rate by `output_buffer_samples()`, so a chunk stays ~100 ms instead of becoming 23 ms at 48 kHz; the scaling is by ratio so 11025 Hz still yields exactly 1100 and nothing moves at the default.
+
 **Voice Switching**:
 - `LangChangeCommand` triggers voice changes via `_resolve_voice_for_language`
 - Maintains `_defaultVoice` vs `curvoice` to track language overrides
