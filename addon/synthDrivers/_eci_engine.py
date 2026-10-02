@@ -28,6 +28,7 @@ import logging
 import os
 from ctypes import (
 	POINTER,
+	c_char_p,
 	c_int,
 	c_short,
 	c_void_p,
@@ -40,6 +41,41 @@ from typing import Callable, Dict, Optional
 LOGGER = logging.getLogger("eloquence.engine")
 
 Callback = ctypes.WINFUNCTYPE(c_int, c_int, c_int, c_int, c_void_p)
+
+# Every ECI entry point this module calls, with its ctypes signature.
+#
+# Declaring these is not tidiness.  An ECI handle is a pointer, and without
+# argtypes ctypes marshals the Python int it has become as a C int: that
+# silently truncates any handle above 2 GiB and, on 64-bit, raises "int too long
+# to convert" outright.  A larger openevv build did exactly that, having been
+# mapped above the boundary the previous one happened to sit below.  Nothing here
+# depends on which engine is loaded -- the proprietary 32-bit DLL is one unlucky
+# allocation away from the same fault -- so tests/test_eci_signatures.py checks
+# that every call site in this module is covered.
+ECI_SIGNATURES = {
+	"eciNewEx": ([c_int], c_void_p),
+	"eciDelete": ([c_void_p], c_void_p),
+	"eciRegisterCallback": ([c_void_p, Callback, c_void_p], None),
+	"eciSetOutputBuffer": ([c_void_p, c_int, POINTER(c_short)], c_int),
+	"eciAddText": ([c_void_p, c_char_p], c_int),
+	"eciInsertIndex": ([c_void_p, c_int], c_int),
+	"eciSynthesize": ([c_void_p], c_int),
+	"eciSynchronize": ([c_void_p], c_int),
+	"eciStop": ([c_void_p], c_int),
+	"eciGetParam": ([c_void_p, c_int], c_int),
+	"eciSetParam": ([c_void_p, c_int, c_int], c_int),
+	"eciGetVoiceParam": ([c_void_p, c_int, c_int], c_int),
+	"eciSetVoiceParam": ([c_void_p, c_int, c_int, c_int], c_int),
+	"eciCopyVoice": ([c_void_p, c_int, c_int], c_int),
+	# A dictionary handle is a pointer in its own right, so it needs the same
+	# treatment as the engine handle.
+	"eciNewDict": ([c_void_p], c_void_p),
+	"eciSetDict": ([c_void_p, c_void_p], c_int),
+	"eciLoadDict": ([c_void_p, c_void_p, c_int, c_char_p], c_int),
+	"eciDeleteDict": ([c_void_p, c_void_p], c_int),
+	# Queried by available_languages() on a freshly loaded library, before any
+	# engine exists, so it is declared there rather than here.
+}
 
 # Eloquence parameter identifiers.
 HSZ = 1
@@ -249,14 +285,9 @@ class EciEngine:
 			except (OSError, AttributeError):
 				pass
 		self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
-		self._dll.eciRegisterCallback.argtypes = [c_void_p, Callback, c_void_p]
-		self._dll.eciRegisterCallback.restype = None
-		self._dll.eciSetOutputBuffer.argtypes = [c_void_p, c_int, POINTER(c_short)]
-		self._dll.eciSetOutputBuffer.restype = c_int
+		self._declare_signatures()
 
 		language_id = LANGS.get(self._config.language_code, LANGS["enu"])
-		self._dll.eciNewEx.argtypes = [c_int]
-		self._dll.eciNewEx.restype = c_void_p
 		handle = self._dll.eciNewEx(language_id)
 		if not handle:
 			raise RuntimeError(
@@ -282,6 +313,20 @@ class EciEngine:
 			self._dll.eciSetParam(handle, 42, 1)
 		if self._config.enable_abbrev_dict:
 			self._dll.eciSetParam(handle, 41, 1)
+
+	def _declare_signatures(self) -> None:
+		"""Give ctypes an argtype for every ECI entry point this module calls."""
+		for name, (argtypes, restype) in ECI_SIGNATURES.items():
+			try:
+				function = getattr(self._dll, name)
+			except AttributeError:
+				# openevv does not export quite everything the proprietary engine
+				# does, and a missing entry point fails loudly at its call site
+				# rather than here, where it would take the whole engine down.
+				LOGGER.info("Eloquence library does not export %s", name)
+				continue
+			function.argtypes = argtypes
+			function.restype = restype
 
 	def _rewrite_ini(self, eloquence_dir: str) -> None:
 		"""Point the proprietary ECI.INI at the real engine directory.

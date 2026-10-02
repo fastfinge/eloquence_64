@@ -74,6 +74,8 @@ The Eloquence Host Process is started lazily, so a user who only speaks a langua
 - **No NVDA imports** - the Eloquence Host Process has none of them.
 - **No relative imports** - the Synth Driver side imports it as `from . import _eci_engine`, while the frozen host imports it as a top-level `import _eci_engine`.
 
+A third rule is about ctypes rather than packaging, and `tests/test_eci_signatures.py` asserts it: **every ECI entry point called here must have an entry in `ECI_SIGNATURES`**. An ECI handle is a pointer, and a call with no `argtypes` marshals it as a C int - silently truncating a handle above 2 GiB, and on 64-bit raising `int too long to convert` instead. A larger openevv build hit exactly that at `eciSetParam`, having been mapped above the boundary the previous build happened to sit below, with nothing changed on this side.
+
 PyInstaller freezes a copy into the host executable via `--paths addon\synthDrivers` in `build_host.cmd`. Without that flag the host builds clean and then fails to import the engine on launch, because PyInstaller does not execute the runtime `sys.path.append`.
 
 The Host Command protocol also lives there, in `EciDispatcher`, so neither backend can answer a command the other would answer differently. `HostController` is pure transport over the Host Channel.
@@ -184,7 +186,7 @@ eloquence_64/
 When modifying synthesis behavior:
 1. Check if changes belong in the Synth Driver side (`addon/synthDrivers/eloquence.py`) or Eloquence Host Process (`host_eloquence32.py`)
 2. If adding new Host Commands, update both the Synth Driver side (`addon/synthDrivers/_eloquence.py`) and `HostController` handlers
-3. Run `build_host.cmd` after changing `host_eloquence32.py`
+3. Run `build_host.cmd` after changing `host_eloquence32.py` **or `_eci_engine.py`** - PyInstaller freezes a copy of the shared wrapper into the host, so the running host keeps the old one until it is rebuilt
 4. Run `scons.bat` to package changes into the add-on
 
 When debugging IPC issues:
