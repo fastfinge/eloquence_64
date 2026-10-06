@@ -12,15 +12,19 @@ Two engines, fetched for different reasons:
   this binary is treated like the proprietary files and kept out of source
   control too.
 
-openevv is taken from its CI rather than from a release, because the newest
-release (v0.3, 21 August) predates the fix for Mudb0y/openevv#35 -- an ``eciStop``
-on an idle engine that wedged it and then crashed the process.  Measured against
-the ``build`` artifact for main@7ee8c572: v0.3 produces no audio on the third
-cancellation, that build runs all ten rounds clean.  This is meant to be
-temporary: ``--openevv-release`` still takes the newest release, and should
-become the default again once one ships the fix.  Taking the head of main does
-mean a rebuild can pick up an openevv commit nobody here has tried, which is why
-the commit is recorded in ``openevv-version.txt``.
+By default openevv is taken from its newest CI build on main, and published
+releases of this add-on take openevv's newest release instead
+(``--openevv-release``, passed by .github/workflows/build.yml on a release
+event).  So development builds catch an upstream change early, and what ships
+to users is a tagged openevv build that does not expire.  Taking the head of main
+does mean a rebuild can pick up an openevv commit nobody here has tried, which is
+why the build is recorded in ``openevv-version.txt``.
+
+CI was the only source for a while: v0.3 (21 August) predates the fix for
+Mudb0y/openevv#35 -- an ``eciStop`` on an idle engine that wedged it and then
+crashed the process.  v0.4 (5 October) carries it: it is main@7ee8c572 plus two
+commits, and measures the same as that build -- ten clean cancellation rounds,
+and identical audio with and without the add-on's dictionaries.
 
 Downloading a CI artifact needs a GitHub token, unlike a release asset; see
 _github_token().
@@ -333,7 +337,7 @@ def _newest_openevv_ci_artifact():
 def fetch_openevv_ci():
 	"""Install the 64-bit engine from openevv's newest successful CI build.
 
-	The default; why is in this module's docstring.
+	The default outside published releases; why is in this module's docstring.
 	"""
 	print(f"Resolving the newest successful {OPENEVV_CI_WORKFLOW} run on {OPENEVV_REPO}...")
 	run, artifact = _newest_openevv_ci_artifact()

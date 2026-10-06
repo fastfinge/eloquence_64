@@ -1,6 +1,8 @@
 import importlib.util
 import queue
 import sys
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -121,6 +123,76 @@ class AudioWorkerTests(unittest.TestCase):
 
 		self.assertLess(events.index(("feed", b"audio")), events.index(("index", 42)))
 		self.assertLess(events.index(("index", 42)), events.index(("index", None)))
+
+
+class BlockingPlayer:
+	"""A player whose first feed() blocks until released, to hold a worker busy."""
+
+	def __init__(self, block=False):
+		self.fed = []
+		self.entered = threading.Event()
+		self.release = threading.Event()
+		if not block:
+			self.release.set()
+
+	def feed(self, data, onDone=None):
+		self.entered.set()
+		self.release.wait(timeout=5)
+		self.fed.append(data)
+
+	def sync(self):
+		pass
+
+	def idle(self):
+		pass
+
+	def stop(self):
+		pass
+
+	def close(self):
+		pass
+
+
+class AudioPipelineRestartTests(unittest.TestCase):
+	def test_worker_stopped_while_busy_does_not_silence_the_next_one(self):
+		# A synth switch mid-speech: the worker is inside a chunk when
+		# close_audio() stops it, so it leaves at its loop test without taking the
+		# stop marker.  The pipeline is module-level and outlives the switch, so
+		# the next initialize_audio() must not hand that marker to its new worker.
+		module = _load_client_module()
+		module.onIndexReached = None
+		pipeline = module.AudioPipeline()
+		first = BlockingPlayer(block=True)
+		second = BlockingPlayer()
+		players = iter((first, second))
+		pipeline._create_player = lambda rate: next(players)
+
+		pipeline.initialize_audio()
+		old_worker = pipeline.worker
+		# Two chunks: the worker holds one back, so the second is what feeds.
+		pipeline.handle_event("audio", {"data": b"one"})
+		pipeline.handle_event("audio", {"data": b"two"})
+		self.assertTrue(first.entered.wait(timeout=5))
+
+		closer = threading.Thread(target=pipeline.close_audio)
+		closer.start()
+		deadline = time.monotonic() + 5
+		while not old_worker._stopping and time.monotonic() < deadline:
+			time.sleep(0.01)
+		first.release.set()
+		closer.join(timeout=5)
+		self.assertFalse(old_worker.is_alive())
+
+		pipeline.initialize_audio()
+		pipeline.handle_event("audio", {"data": b"after"})
+		pipeline.handle_event("audio", {"data": b"switch"})
+		deadline = time.monotonic() + 5
+		while not second.fed and time.monotonic() < deadline:
+			time.sleep(0.01)
+
+		self.assertTrue(pipeline.worker.is_alive())
+		self.assertEqual(second.fed, [b"after"])
+		pipeline.close_audio()
 
 
 if __name__ == "__main__":
