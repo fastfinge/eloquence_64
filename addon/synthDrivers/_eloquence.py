@@ -286,6 +286,12 @@ class AudioPipeline:
 			self.rate = rate
 		self._requested_rate = self.rate
 		self.player = self._create_player(self.rate)
+		# Every worker gets a queue of its own.  A worker busy with a chunk when
+		# stop() lands leaves at its loop test without taking the None stop()
+		# queued, and this pipeline outlives every synth switch, so a shared queue
+		# would hand that None to the next worker as its first item -- silent
+		# until NVDA restarts.  Anything else left behind is stale audio anyway.
+		self.queue = queue.Queue()
 		self.worker = AudioWorker(self.player, self.queue, self)
 		self.worker.start()
 
