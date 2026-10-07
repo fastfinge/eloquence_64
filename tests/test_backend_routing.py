@@ -194,6 +194,8 @@ class BackendActivationTests(unittest.TestCase):
 		# The proprietary ECI.INI carries C:\dummy\ placeholders that do need
 		# rewriting, so the host must not inherit openevv's opt-out.
 		self.assertNotEqual(payload.get("rewriteIni"), False)
+		# Nor openevv's eciWideband, which the proprietary engine does not have.
+		self.assertFalse(payload.get("wideband", False))
 
 	def test_the_in_process_engine_is_initialized_for_openevv_not_the_host_dll(self):
 		self.module._active = self.host
@@ -206,6 +208,7 @@ class BackendActivationTests(unittest.TestCase):
 		# from the same directory the host does, so that is passed through.
 		self.assertEqual(payload["dataDirectory"], "C:\\")
 		self.assertFalse(payload["rewriteIni"])
+		self.assertTrue(payload["wideband"])
 
 	def test_switching_backend_is_a_no_op_when_it_is_already_active(self):
 		self.module._activate(self.direct)
@@ -347,6 +350,7 @@ class DirectInitializePayloadTests(unittest.TestCase):
 		self.module._direct_initialize_payload(original)
 		self.assertEqual(original["eciPath"], r"C:\eci.dll")
 		self.assertNotIn("rewriteIni", original)
+		self.assertNotIn("wideband", original)
 
 
 class DirectCancellationTests(unittest.TestCase):

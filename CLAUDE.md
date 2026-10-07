@@ -137,6 +137,8 @@ Two things are load-bearing and easy to undo by accident:
 - **The rate change travels through the pipeline queue** as a `RateChange` item, not applied where it is decided. Audio the outgoing engine already produced is still queued behind it, and reopening the device on the caller's thread would play that tail at the new rate. The worker `sync()`s before closing the old player, or the tail is swallowed instead.
 - **`set_sample_rate()` queues the engine work onto the EloquenceSynthWorker** rather than doing it inline. Changing a rate replaces the engine's PCM output buffer, and the setting changes on NVDA's thread while the worker may be inside `synthesize()`.
 
+**openevv's `eciWideband` (parameter 32) is always on for the Direct Backend**, and is not a user setting. Above 11025 Hz openevv still synthesises at 11025 and resamples, so without it every higher rate is just the 11025 Hz voice upsampled, with nothing above ~5.5 kHz. With it on, a second synthesiser supplies the top band. Measured on `main@c3a253fb`: energy above 6 kHz goes from about -83 dB to -28 dB at 22050/44100/48000, with identical duration; at 8000/11025 it changes nothing. It survives rate, language and voice changes, so it is set once at engine start (`EngineConfig.wideband`, set by `_direct_initialize_payload()`). The proprietary engine has no such parameter and is never offered it. openevv v0.4 predates it and refuses it with `-1`, which is logged at INFO and otherwise harmless.
+
 `OUTPUT_BUFFER_SAMPLES` is scaled with the rate by `output_buffer_samples()`, so a chunk stays ~100 ms instead of becoming 23 ms at 48 kHz; the scaling is by ratio so 11025 Hz still yields exactly 1100 and nothing moves at the default.
 
 **Voice Switching**:

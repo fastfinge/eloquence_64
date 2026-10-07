@@ -171,6 +171,20 @@ SAMPLE_RATE_VALUES: Dict[int, int] = {
 	6: 48000,
 }
 
+# openevv's own parameter, with no counterpart in IBM's ECI.  Above 11025 Hz
+# openevv still synthesises at 11025 and resamples, so without this every higher
+# rate is the 11025 Hz voice upsampled, with nothing above ~5.5 kHz.  On, a
+# second synthesiser running at 22050 supplies the band above ~5.4 kHz.  Measured
+# against openevv main@c3a253fb, energy above 6 kHz relative to the whole
+# utterance goes from about -83 dB to -28 dB at 22050, 44100 and 48000 alike,
+# with identical duration; at 8000 and 11025 it changes nothing.  It survives
+# changes to the sample rate, the language, and the voice; only eciReset clears it.
+#
+# Not a user setting: there is no rate at which off sounds better.  Set only on
+# the Direct Backend (EngineConfig.wideband), since the proprietary engine has no
+# such parameter.
+ECI_WIDEBAND = 32
+
 LANGS: Dict[str, int] = {
 	"esm": 131073,
 	"esp": 131072,
@@ -246,6 +260,9 @@ class EngineConfig:
 	# Requested output rate in Hz.  Each engine runs at the nearest rate it
 	# supports at or below this; see choose_sample_rate().
 	sample_rate: int = SAMPLE_RATE
+	# Turn on openevv's eciWideband; see ECI_WIDEBAND.  Off for the proprietary
+	# engine, which has no such parameter.
+	wideband: bool = False
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -420,6 +437,13 @@ class EciEngine:
 		# Allow annotated input so that backquote commands are interpreted instead of spoken.
 		self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
 		self._params[ECI_INPUT_TYPE] = 1
+		if self._config.wideband:
+			# An openevv older than the parameter refuses it with -1, which leaves
+			# it speaking exactly as before, so a refusal is only worth a note.
+			if self._dll.eciSetParam(handle, ECI_WIDEBAND, 1) == -1:
+				LOGGER.info("Eloquence engine does not support eciWideband")
+			else:
+				self._params[ECI_WIDEBAND] = 1
 		self._params[ECI_LANGUAGE_PARAM] = self._dll.eciGetParam(handle, ECI_LANGUAGE_PARAM)
 		for param in (RATE, PITCH, VLM, FLUCTUATION):
 			self._voice_params[param] = self._dll.eciGetVoiceParam(handle, 0, param)
@@ -766,6 +790,7 @@ class EciDispatcher:
 			voice_variant=payload.get("voiceVariant", 0),
 			rewrite_ini=payload.get("rewriteIni", True),
 			sample_rate=payload.get("sampleRate", SAMPLE_RATE),
+			wideband=payload.get("wideband", False),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.start()
