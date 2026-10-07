@@ -24,13 +24,15 @@ from addon.synthDrivers import _eci_engine as engine
 
 
 class _Dll:
-	"""Records every eciSetParam; refuses the wideband parameter if told to."""
+	"""Records every call in order; refuses the wideband parameter if told to."""
 
 	def __init__(self, knows_wideband=True):
 		self.knows_wideband = knows_wideband
 		self.set_params = []
+		self.calls = []
 
 	def eciSetParam(self, handle, param, value):
+		self.calls.append(("eciSetParam", param))
 		self.set_params.append((param, value))
 		if param == engine.ECI_WIDEBAND and not self.knows_wideband:
 			return -1
@@ -41,6 +43,7 @@ class _Dll:
 
 	def __getattr__(self, name):
 		def anything(*args):
+			self.calls.append((name,))
 			return 1
 
 		return anything
@@ -93,6 +96,66 @@ class EngineTests(unittest.TestCase):
 		# openevv v0.4, the newest release, predates the parameter.
 		instance, _dll = _start(wideband=True, knows_wideband=False)
 		self.assertNotIn(engine.ECI_WIDEBAND, instance.get_state()["params"])
+
+
+class PrimingTests(unittest.TestCase):
+	"""Once parameter 32 is set, openevv drops every sample-rate change and refuses
+	every eciSetOutputBuffer until it has synthesised once.  NVDA applies the
+	configured rate before speaking anything, so the engine is primed with a
+	textless synthesis straight after.  Measured 2026-10-06 on main@c3a253fb,
+	samples for one utterance at 11025 = 13002:
+
+		wideband, rate 44100, speak             13002  (rate dropped)
+		wideband, synth no text, rate 44100     52008
+		rate 44100, wideband, speak             52008
+	"""
+
+	def test_the_engine_synthesises_once_straight_after_wideband(self):
+		_instance, dll = _start(wideband=True)
+		after = dll.calls[dll.calls.index(("eciSetParam", engine.ECI_WIDEBAND)) :]
+		self.assertEqual(after[1:3], [("eciSynthesize",), ("eciSynchronize",)])
+
+	def test_wideband_comes_after_the_output_buffer(self):
+		_instance, dll = _start(wideband=True)
+		self.assertLess(
+			dll.calls.index(("eciSetOutputBuffer",)),
+			dll.calls.index(("eciSetParam", engine.ECI_WIDEBAND)),
+		)
+
+	def test_nothing_is_synthesised_without_wideband(self):
+		_instance, dll = _start(wideband=False)
+		self.assertNotIn(("eciSynthesize",), dll.calls)
+
+	def test_nothing_is_synthesised_when_the_engine_refuses_it(self):
+		_instance, dll = _start(wideband=True, knows_wideband=False)
+		self.assertNotIn(("eciSynthesize",), dll.calls)
+
+
+class RefusedBufferTests(unittest.TestCase):
+	"""An engine that refuses a new output buffer keeps writing into its old one,
+	so that one must stay alive.  Dropping it freed memory openevv was still
+	filling, and NVDA crashed inside nvwave a moment later."""
+
+	def _engine(self, accept):
+		instance, dll = _start(wideband=False)
+		instance._supported_sample_rates = {11025: 1, 44100: 5}
+		dll.eciSetOutputBuffer = lambda handle, samples, buffer: int(accept)
+		return instance
+
+	def test_a_refused_buffer_leaves_the_old_one_in_place(self):
+		instance = self._engine(accept=False)
+		buffer, samples = instance._buffer, instance._samples
+		with self.assertLogs(engine.LOGGER, "WARNING"):
+			self.assertEqual(instance.set_sample_rate(44100), 44100)
+		self.assertIs(instance._buffer, buffer)
+		self.assertEqual(instance._samples, samples)
+
+	def test_an_accepted_buffer_replaces_it(self):
+		instance = self._engine(accept=True)
+		buffer = instance._buffer
+		instance.set_sample_rate(44100)
+		self.assertIsNot(instance._buffer, buffer)
+		self.assertEqual(instance._samples, engine.output_buffer_samples(44100))
 
 
 class DispatcherTests(unittest.TestCase):

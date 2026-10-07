@@ -431,6 +431,8 @@ class EciEngine:
 		# Before the first eciSetOutputBuffer, so the buffer is sized for the rate
 		# the engine will actually run at.
 		self._sample_rate = self._apply_sample_rate(self._config.sample_rate)
+		self._samples = output_buffer_samples(self._sample_rate)
+		self._buffer = (c_short * self._samples)()
 		result = self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer)
 		if not result:
 			raise RuntimeError("eciSetOutputBuffer failed")
@@ -438,12 +440,7 @@ class EciEngine:
 		self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
 		self._params[ECI_INPUT_TYPE] = 1
 		if self._config.wideband:
-			# An openevv older than the parameter refuses it with -1, which leaves
-			# it speaking exactly as before, so a refusal is only worth a note.
-			if self._dll.eciSetParam(handle, ECI_WIDEBAND, 1) == -1:
-				LOGGER.info("Eloquence engine does not support eciWideband")
-			else:
-				self._params[ECI_WIDEBAND] = 1
+			self._enable_wideband()
 		self._params[ECI_LANGUAGE_PARAM] = self._dll.eciGetParam(handle, ECI_LANGUAGE_PARAM)
 		for param in (RATE, PITCH, VLM, FLUCTUATION):
 			self._voice_params[param] = self._dll.eciGetVoiceParam(handle, 0, param)
@@ -454,6 +451,33 @@ class EciEngine:
 			self._dll.eciSetParam(handle, 42, 1)
 		if self._config.enable_abbrev_dict:
 			self._dll.eciSetParam(handle, 41, 1)
+
+	def _enable_wideband(self) -> None:
+		"""Turn on openevv's eciWideband, and leave the engine able to change rate.
+
+		Measured against openevv main@c3a253fb: once parameter 32 has been set --
+		to anything, 0 included -- the engine ignores every sample-rate change and
+		refuses every eciSetOutputBuffer until it has synthesised once.  The rate
+		change is dropped silently, not refused: eciSetParam still answers as if it
+		took, and the next utterance comes out at the old rate, which the player
+		then plays at the new one.  NVDA applies the configured sample rate as it
+		loads the driver's settings, before anything is spoken, so it always fell
+		into that window -- and the refused buffer swap then crashed NVDA (see
+		set_sample_rate()).
+
+		A synthesis with no text queued clears it and makes no sound.  Language
+		changes and eciCopyVoice do not bring it back; only setting parameter 32
+		again does, so this is set once and never again.
+
+		An openevv older than the parameter refuses it with -1, which leaves it
+		speaking exactly as before, so a refusal is only worth a note.
+		"""
+		if self._dll.eciSetParam(self._handle, ECI_WIDEBAND, 1) == -1:
+			LOGGER.info("Eloquence engine does not support eciWideband")
+			return
+		self._params[ECI_WIDEBAND] = 1
+		self._dll.eciSynthesize(self._handle)
+		self._dll.eciSynchronize(self._handle)
 
 	def _probe_sample_rates(self) -> Dict[int, int]:
 		"""Ask the engine which rates it takes, as {Hz: ECI parameter value}.
@@ -489,8 +513,6 @@ class EciEngine:
 		rate = choose_sample_rate(requested, self._supported_sample_rates)
 		self._dll.eciSetParam(self._handle, ECI_SAMPLE_RATE, self._supported_sample_rates[rate])
 		self._params[ECI_SAMPLE_RATE] = self._supported_sample_rates[rate]
-		self._samples = output_buffer_samples(rate)
-		self._buffer = (c_short * self._samples)()
 		return rate
 
 	def set_sample_rate(self, requested: int) -> int:
@@ -500,11 +522,31 @@ class EciEngine:
 		an existing handle -- but only between utterances: the output buffer is
 		replaced here, and swapping it under a synthesis in flight would hand the
 		engine a buffer it is already writing into.
+
+		The new buffer is only adopted once the engine has accepted it.  An engine
+		that refuses one goes on writing into the buffer it already had, and
+		dropping that one regardless freed memory the engine was still filling:
+		openevv did exactly that after eciWideband (see _enable_wideband()), and
+		NVDA crashed a moment later inside nvwave.
 		"""
 		rate = self._apply_sample_rate(requested)
 		self._sample_rate = rate
-		if not self._dll.eciSetOutputBuffer(self._handle, self._samples, self._buffer):
-			raise RuntimeError("eciSetOutputBuffer failed")
+		samples = output_buffer_samples(rate)
+		if samples == self._samples:
+			return rate
+		buffer = (c_short * samples)()
+		if self._dll.eciSetOutputBuffer(self._handle, samples, buffer):
+			self._samples = samples
+			self._buffer = buffer
+		else:
+			# Loud, because the openevv case that refused also dropped the rate
+			# change itself, which plays at the wrong speed.
+			LOGGER.warning(
+				"Eloquence engine refused a new output buffer at %d Hz; keeping its "
+				"%d-sample one",
+				rate,
+				self._samples,
+			)
 		return rate
 
 	@property
