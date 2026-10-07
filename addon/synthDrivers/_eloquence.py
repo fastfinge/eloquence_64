@@ -925,9 +925,11 @@ def _activate(backend: EngineClient) -> None:
 def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 	"""Retarget an initialize payload at the in-process openevv engine.
 
-	Only two things differ from the host's payload: which library to load, and
+	Only three things differ from the host's payload: which library to load;
 	that openevv resolves its own data relative to that library and ships an
-	eci.ini needing none of the C:\\dummy\\ rewriting the proprietary ECI.INI does.
+	eci.ini needing none of the C:\\dummy\\ rewriting the proprietary ECI.INI does;
+	and that eciWideband is turned on, an openevv parameter the proprietary
+	engine does not have (see _eci_engine.ECI_WIDEBAND).
 
 	``dataDirectory`` is passed through unchanged, and deliberately so.  It points
 	at the proprietary engine's directory, where the .dic files live, which is
@@ -938,6 +940,7 @@ def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 	payload = dict(payload)
 	payload["eciPath"] = openevv_engine_path()
 	payload["rewriteIni"] = False
+	payload["wideband"] = True
 	return payload
 
 
