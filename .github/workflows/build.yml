@@ -6,6 +6,13 @@ on:
   release:
     types: [published]
 
+# Read-only by default.  The repository's default token is read-write, and
+# non-release builds compile upstream code that isn't pinned (eloquence-contours
+# master, openevv's newest CI artifact), so the build job should not be able to
+# push.  Only the release job below gets write access.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-2025
@@ -103,10 +110,29 @@ jobs:
           path: "*.pot"
           archive: false
 
+  # Kept in its own job because permissions cannot be conditional on the event:
+  # this way only a published release ever holds a token that can write.
+  # Both artifacts were uploaded with archive: false, so each artifact is named
+  # after its file.  skip-decompress keeps the .nvda-addon, itself a zip, from
+  # being unpacked on download.
+  release:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+
       - name: Upload to release
-        if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            *.nvda-addon
-            *.pot
+            dist/*.nvda-addon
+            dist/*.pot
