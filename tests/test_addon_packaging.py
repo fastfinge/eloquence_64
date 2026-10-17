@@ -80,3 +80,27 @@ class OpenevvPackagingTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class ContoursPackagingTests(unittest.TestCase):
+	"""Eloquence Contours are built at build time, so they may legitimately be absent."""
+
+	def setUp(self):
+		self.contours_dir = _REPO_ROOT / "addon" / "synthDrivers" / "contours"
+		if not (self.contours_dir / "eloquence_contours.dll").exists():
+			self.skipTest("Eloquence Contours not built; run `build_contours.cmd`")
+
+	def test_built_contours_are_bundled_with_their_adapter_and_licence(self):
+		with tempfile.TemporaryDirectory() as root:
+			addon_path = Path(root) / "Eloquence-test.nvda-addon"
+			createAddonBundleFromPath(_REPO_ROOT / "addon", addon_path, excludePatterns=())
+			with zipfile.ZipFile(addon_path) as addon:
+				bundled_files = set(addon.namelist())
+		# GPL-2.0-only, so the licence travels with the binary.
+		for name in ("eloquence_contours.dll", "eloquence_contours.py", "LICENSE", "contours-version.txt"):
+			with self.subTest(name=name):
+				self.assertIn(f"synthDrivers/contours/{name}", bundled_files)
+
+	def test_the_contours_directory_is_not_a_package(self):
+		# NVDA offers every package under synthDrivers as a synthesizer.
+		self.assertFalse((self.contours_dir / "__init__.py").exists())

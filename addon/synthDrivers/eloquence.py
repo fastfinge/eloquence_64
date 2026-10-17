@@ -536,6 +536,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		DriverSetting("pauseMode", _("Shorten &pauses"), defaultVal="0"),
 		# Translators: A synth setting available in speech settings dialog
 		DriverSetting("sampleRate", _("Sample &rate"), defaultVal="11025"),
+		# Translators: A synth setting available in speech settings dialog. A
+		# contour shapes the synthesizer's audio after it is produced.
+		DriverSetting("contour", _("Audio conto&ur"), defaultVal="raw"),
 	)
 	supportedCommands = {
 		IndexCommand,
@@ -854,6 +857,30 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		# _eloquence.set_sample_rate().  An engine that cannot do this rate runs at
 		# its own best one, which is why nothing is read back to confirm.
 		_eloquence.set_sample_rate(rate)
+
+	# Eloquence Contours.  The module only knows 11025 and 16000 Hz, and not every
+	# contour exists at both, so the labels say which rate each needs.  Audio at a
+	# rate a contour does not cover plays raw, which is also how a backend that
+	# cannot reach the chosen sample rate is handled; see _contours.MODES.
+	_contours = {
+		# Translators: An option in the "Audio contour" combo box in speech settings
+		"raw": StringParameterInfo("raw", _("Raw (no contour)")),
+		# Translators: An option in the "Audio contour" combo box in speech settings
+		"presence": StringParameterInfo("presence", _("Presence (11025 or 16000 Hz)")),
+		# Translators: An option in the "Audio contour" combo box in speech settings
+		"treble": StringParameterInfo("treble", _("Presence treble (11025 Hz only)")),
+		# Translators: An option in the "Audio contour" combo box in speech settings
+		"smooth": StringParameterInfo("smooth", _("Smooth (16000 Hz only)")),
+	}
+
+	def _get_availableContours(self):
+		return self._contours
+
+	def _get_contour(self):
+		return _eloquence.requested_contour()
+
+	def _set_contour(self, val):
+		_eloquence.set_contour(val)
 
 	def _set_pauseMode(self, val):
 		self._pause_mode = int(val)

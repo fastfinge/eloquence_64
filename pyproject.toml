@@ -26,6 +26,9 @@ exclude = [
 	"./addon/synthDrivers/eloquence/multiprocessing/*",
 	# Git submodule
 	"./AltIBMTTSDictionaries/*",
+	"./eloquence-contours/*",
+	# Copied from that submodule by build_contours.cmd
+	"./addon/synthDrivers/contours/*",
 	# SCons build tools (third-party-style)
 	"./site_scons/*",
 ]

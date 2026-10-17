@@ -13,6 +13,23 @@ For development scenarios where the prebuilt Eloquence Host Process executable i
 the `ELOQUENCE_HOST_COMMAND` environment variable can be set to the command that
 launches a compatible 32-bit Python interpreter with `host_eloquence32.py`.
 
+## Audio contours
+
+The **Audio contour** setting in NVDA's Speech settings shapes Eloquence's audio
+after it is synthesised, using
+[Eloquence Contours](https://github.com/Nick6489/eloquence-contours). It applies
+to both engines alike. The contours are tied to the sample rate the engine runs at:
+
+| Contour | 11025 Hz | 16000 Hz |
+| --- | --- | --- |
+| Raw (default) | unchanged | unchanged |
+| Presence | Classic Presence, played at 22050 Hz | native Presence |
+| Presence treble | hozosch v19.1 treble, played at 22050 Hz | — |
+| Smooth | — | native Smooth |
+
+At any other sample rate, or with a contour that has no version for the rate in
+use, audio plays raw.
+
 ## Traditional Chinese Script Conversion
 
 When the Mandarin Chinese voice is selected, Text Preprocessing applies Script
@@ -87,19 +104,26 @@ background.
 - [Python Install Manager](https://www.python.org/ftp/python/pymanager/python-manager-25.0.msix) (`.msix`)
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - 32-bit Python 3.13: `py install 3.13-32`
+- [Rust](https://rustup.rs/) with the `x86_64-pc-windows-msvc` target, for Eloquence Contours
 
 ### Build steps
 
 ```bash
-git submodule init && git submodule update   # fetch pronunciation dictionaries
+git submodule init && git submodule update   # fetch submodules (Eloquence Contours)
 python fetch_eci.py                          # one-time: download proprietary ECI.DLL + voice data
 build_host.cmd                               # compile Eloquence Host Process (only needed if host_eloquence32.py changes)
+build_contours.cmd                           # build Eloquence Contours (add --latest to take upstream master)
 scons.bat                                    # package everything into the .nvda-addon file
 ```
 
-**Note:** `scons.bat` validates that proprietary files and the Eloquence Host
-Process executable exist, but does not fetch or build them — steps 2 and 3 must
-be done first.
+**Note:** `scons.bat` validates that proprietary files, the Eloquence Host
+Process executable and the contour DLL exist, but does not fetch or build them —
+the earlier steps must be done first.
+
+The `eloquence-contours` submodule is pinned, and published releases build
+that commit. Every other CI build runs `build_contours.cmd --latest` against
+upstream master, and Dependabot opens a pull request to move the pin whenever
+upstream changes.
 
 ### Development checks
 

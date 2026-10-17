@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from . import _contours
 from . import _eci_engine as _engine
 from . import _eloquence_ipc as _ipc
 from . import _eloquence_job as _job
@@ -57,12 +58,28 @@ class RateChange:
 		self.rate = rate
 
 
+class ContourChange:
+	"""A request to change the Eloquence Contour, queued in order like RateChange.
+
+	Queued rather than applied on NVDA's thread so audio already waiting keeps
+	the contour it was produced under; see _contours.
+	"""
+
+	__slots__ = ("setting",)
+
+	def __init__(self, setting: str) -> None:
+		self.setting = setting
+
+
 class AudioWorker(threading.Thread):
 	def __init__(
 		self,
 		player: nvwave.WavePlayer,
 		queue: "queue.Queue[Optional[AudioChunk]]",
 		pipeline: "AudioPipeline",
+		contour: Any = None,
+		input_rate: int = _engine.SAMPLE_RATE,
+		contour_setting: str = _contours.DEFAULT_SETTING,
 	):
 		super().__init__(daemon=True)
 		self._player = player
@@ -71,8 +88,23 @@ class AudioWorker(threading.Thread):
 		self._running = True
 		self._stopping = False
 		self._player_lock = threading.RLock()
+		# The contour stream, owned by this thread alone, and what it was made
+		# for.  The input rate is the engine's, which is not the player's once a
+		# contour upsamples, so the two are tracked apart.
+		self._contour = contour
+		self._input_rate = input_rate
+		self._contour_setting = contour_setting
+		# The Speech Generation the contour's filter history belongs to.
+		self._contour_seq: Optional[int] = None
 
 	def run(self) -> None:
+		try:
+			self._run()
+		finally:
+			# Only once the loop has exited, so nothing can still be inside it.
+			self._close_contour()
+
+	def _run(self) -> None:
 		pending_audio: Optional[AudioChunk] = None
 		while self._running:
 			try:
@@ -81,13 +113,17 @@ class AudioWorker(threading.Thread):
 				continue
 			if chunk is None:
 				break
-			if isinstance(chunk, RateChange):
+			if isinstance(chunk, (RateChange, ContourChange)):
 				# Anything held back is older than this request, so it belongs to
-				# the outgoing rate and has to go out before the player changes.
+				# the outgoing rate and contour and has to go out before either
+				# changes.
 				if pending_audio:
 					self._feed_audio(*pending_audio[:3])
 					pending_audio = None
-				self._switch_rate(chunk.rate)
+				if isinstance(chunk, RateChange):
+					self._reconfigure(chunk.rate, self._contour_setting)
+				else:
+					self._reconfigure(self._input_rate, chunk.setting)
 				self._queue.task_done()
 				continue
 			data, index, is_final, seq = chunk
@@ -96,6 +132,19 @@ class AudioWorker(threading.Thread):
 			if seq < self._pipeline.sequence:
 				self._queue.task_done()
 				continue
+
+			if data and self._contour is not None:
+				processed = self._apply_contour(data, seq)
+				if processed is None:
+					# The contour failed and has been dropped; what is held back was
+					# shaped by it, so it goes out before the player drops back.
+					if pending_audio:
+						self._feed_audio(*pending_audio[:3])
+						pending_audio = None
+					self._switch_rate(self._input_rate)
+				else:
+					data = processed
+					chunk = (data, index, is_final, seq)
 
 			if data:
 				# Hold one real Audio Chunk so a following index-only event can use
@@ -124,6 +173,46 @@ class AudioWorker(threading.Thread):
 				if is_final:
 					self._schedule_idle()
 			self._queue.task_done()
+
+	def _reconfigure(self, input_rate: int, setting: str) -> None:
+		"""Put a contour for *setting* on *input_rate*, then the player on its output.
+
+		A fresh stream rather than a reset one, because the module's state is
+		specific to its rate and mode.  When neither changed, the stream in hand
+		is kept, so its filter history carries across fragments -- including ones
+		from the other backend, when it runs at the same rate.
+		"""
+		if self._stopping:
+			return
+		if input_rate != self._input_rate or setting != self._contour_setting:
+			self._close_contour()
+			self._contour = self._pipeline.make_contour(input_rate, setting)
+			self._input_rate = input_rate
+			self._contour_setting = setting
+			self._contour_seq = None
+		self._switch_rate(self._contour.output_rate if self._contour is not None else input_rate)
+
+	def _apply_contour(self, data: bytes, seq: int) -> Optional[bytes]:
+		"""Shape one real Audio Chunk, or None if the contour has had to go."""
+		try:
+			if seq != self._contour_seq:
+				# A new Speech Generation follows a cancellation, so the history of
+				# the speech that was cut off must not ring into the next.
+				self._contour.reset()
+				self._contour_seq = seq
+			return self._contour.process(data)
+		except Exception:
+			LOGGER.exception("Eloquence Contour failed; playing raw audio from here on")
+			self._close_contour()
+			return None
+
+	def _close_contour(self) -> None:
+		contour, self._contour = self._contour, None
+		if contour is not None:
+			try:
+				contour.close()
+			except Exception:
+				LOGGER.exception("Could not close the Eloquence Contour")
 
 	def _switch_rate(self, rate: int) -> None:
 		"""Let queued audio finish, then put a fresh player on the new rate.
@@ -251,10 +340,16 @@ class AudioPipeline:
 		self.queue: "queue.Queue[Optional[AudioChunk]]" = queue.Queue()
 		self.player: Optional[nvwave.WavePlayer] = None
 		self.worker: Optional[AudioWorker] = None
-		# The rate the player is open at, and the last one asked for.  They differ
-		# only while a RateChange is still working its way down the queue.
+		# The rate the player is open at, and the last engine rate asked for.  They
+		# differ while a RateChange is still working its way down the queue, and
+		# whenever a contour resamples.  Until a player opens, self.rate is simply
+		# the engine rate it will be opened for.
 		self.rate = _engine.SAMPLE_RATE
 		self._requested_rate = _engine.SAMPLE_RATE
+		# The Eloquence Contour setting, and the last one asked for; see
+		# _contours.  Applied by the worker, in queue order, like the rate.
+		self.contour_setting = _contours.DEFAULT_SETTING
+		self.requested_contour = _contours.DEFAULT_SETTING
 		# Speech Generation.  Advanced on every cancellation; Audio Chunks stamped
 		# with an older generation are discarded rather than played.
 		self.sequence = 0
@@ -284,7 +379,11 @@ class AudioPipeline:
 			return
 		if rate:
 			self.rate = rate
-		self._requested_rate = self.rate
+		self._requested_rate = input_rate = self.rate
+		self.contour_setting = self.requested_contour
+		contour = self.make_contour(input_rate, self.contour_setting)
+		if contour is not None:
+			self.rate = contour.output_rate
 		self.player = self._create_player(self.rate)
 		# Every worker gets a queue of its own.  A worker busy with a chunk when
 		# stop() lands leaves at its loop test without taking the None stop()
@@ -292,7 +391,14 @@ class AudioPipeline:
 		# would hand that None to the next worker as its first item -- silent
 		# until NVDA restarts.  Anything else left behind is stale audio anyway.
 		self.queue = queue.Queue()
-		self.worker = AudioWorker(self.player, self.queue, self)
+		self.worker = AudioWorker(
+			self.player,
+			self.queue,
+			self,
+			contour=contour,
+			input_rate=input_rate,
+			contour_setting=self.contour_setting,
+		)
 		self.worker.start()
 
 	# ------------------------------------------------------------------
@@ -311,6 +417,20 @@ class AudioPipeline:
 		else:
 			# Nothing is playing yet, so the next player simply opens at it.
 			self.rate = rate
+
+	def request_contour(self, setting: str) -> None:
+		"""Queue a contour change, in order behind whatever is already queued."""
+		if setting == self.requested_contour:
+			return
+		self.requested_contour = setting
+		if self.worker:
+			self.queue.put(ContourChange(setting))
+		else:
+			self.contour_setting = setting
+
+	def make_contour(self, input_rate: int, setting: str) -> Any:
+		"""A contour stream for engine audio at *input_rate*, or None for raw."""
+		return _contours.create(setting, input_rate)
 
 	def rebuild_player(self, rate: int) -> Optional[nvwave.WavePlayer]:
 		"""Reopen the output device at *rate*.  Called only from the worker."""
@@ -1110,6 +1230,9 @@ def initialize(indexCallback=None):
 		_requested_sample_rate = _engine.SAMPLE_RATE
 	if _requested_sample_rate not in _engine.SAMPLE_RATE_VALUES.values():
 		_requested_sample_rate = _engine.SAMPLE_RATE
+	# Before the device opens, so a contour that upsamples opens it at its own
+	# output rate rather than reopening it straight away.
+	set_contour(voice_conf.get("contour", _contours.DEFAULT_SETTING))
 	# Opened at the configured rate rather than the default and corrected after,
 	# so the usual case does not reopen the device during start-up.
 	_pipeline.initialize_audio(_requested_sample_rate)
@@ -1234,6 +1357,26 @@ def set_sample_rate(rate: int) -> int:
 	synth_queue.put(([(_apply_sample_rate_on_worker, (rate,))], current_generation()))
 	process()
 	return rate
+
+
+def set_contour(setting: str) -> str:
+	"""Choose the Eloquence Contour applied to every backend's audio.
+
+	Put straight onto the Audio Playback Pipeline's queue rather than the
+	synthesis worker's: no engine is involved, and the pipeline queue is what
+	orders it behind audio already produced.  See _contours for how a setting
+	maps onto the module's modes at each rate.
+	"""
+	setting = str(setting)
+	if setting not in _contours.MODES:
+		LOGGER.warning("Ignoring unknown contour %r", setting)
+		return requested_contour()
+	_pipeline.request_contour(setting)
+	return setting
+
+
+def requested_contour() -> str:
+	return _pipeline.requested_contour
 
 
 def speak(text_bytes):

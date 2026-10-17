@@ -21,6 +21,11 @@ addon/synthDrivers/eloquence/PTB.SYN
 # is kept out of source control like the proprietary files above.
 addon/synthDrivers/openevv/
 
+# Eloquence Contours, built from the eloquence-contours submodule by
+# build_contours.cmd.  The adapter is copied too, so upstream changes to it
+# arrive with the DLL they belong to.
+addon/synthDrivers/contours/
+
 # Compiled host tree (built from host_eloquence32.py via PyInstaller --onedir)
 addon/synthDrivers/eloquence_host32/
 # Leftover onefile output from before the onedir switch
