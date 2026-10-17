@@ -47,10 +47,22 @@ This compiles the Eloquence Host Process with PyInstaller from the `uv` `host-bu
 
 The build is `--onedir`, not `--onefile`. A onefile build re-extracts its whole archive to `%TEMP%` on every launch, costing 1.1-3.5s before the Host Channel even opens, and is the shape antivirus heuristics most often flag. The exe resolves `_internal/` relative to itself, so the tree must be kept together.
 
+### Building Eloquence Contours
+```bash
+build_contours.cmd           # the pinned eloquence-contours submodule commit
+build_contours.cmd --latest  # move the submodule to upstream master first
+```
+
+Builds the 64-bit `eloquence_contours.dll` from the `eloquence-contours` submodule (Nick6489/eloquence-contours, GPL-2.0-only Rust) with cargo, and copies it, upstream's Python adapter, its LICENSE and `contours-version.txt` into `addon/synthDrivers/contours/` (gitignored). Needs Rust with the `x86_64-pc-windows-msvc` target. Only the 64-bit DLL: contours run in NVDA's process, whichever engine made the audio.
+
+Update policy mirrors openevv: a published release builds the pinned commit; every other CI build passes `--latest`; `.github/dependabot.yml` opens PRs bumping the pin.
+
 ### Full Rebuild from Scratch
 ```bash
+git submodule update --init  # One-time: get eloquence-contours
 python fetch_eci.py          # One-time: get proprietary files
 build_host.cmd               # If host changed
+build_contours.cmd           # If eloquence-contours changed
 scons.bat
 ```
 
@@ -145,6 +157,14 @@ The proprietary engine has no such parameter and is never offered it. openevv v0
 
 `OUTPUT_BUFFER_SAMPLES` is scaled with the rate by `output_buffer_samples()`, so a chunk stays ~100 ms instead of becoming 23 ms at 48 kHz; the scaling is by ratio so 11025 Hz still yields exactly 1100 and nothing moves at the default.
 
+**Eloquence Contours** (`_contours.py`, the "Audio contour" Speech setting): post-synthesis PCM shaping, applied **once, in `AudioWorker`**, after stale-generation rejection and before `WavePlayer.feed`, so both backends get it and nothing is processed twice. This is upstream's integration contract (its README), and the parts easy to break are:
+- `RateChange.rate` is the **engine input rate**. The worker recreates the contour at it and opens the player at `contour.output_rate` (classic 11025 Hz contours output 22050). Input rate and player rate are tracked separately.
+- A contour change travels through the pipeline queue as `ContourChange`, so queued audio finishes under the contour it was produced with.
+- The contour is reset when an accepted chunk's Speech Generation differs from the last, never per chunk or per index — that would break filter history and Say All continuity. Index-only events are never processed.
+- Upstream supports only 11025 and 16000 Hz; `_contours.MODES` maps each setting to a mode per rate, and anything unmapped plays raw rather than being reinterpreted. Raw never loads the DLL.
+- `contours/` has no `__init__.py`, because NVDA treats every package under `synthDrivers` as a synthesizer; the adapter is loaded by path.
+- The unit-test venv is 32-bit, so the real-DLL tests in `tests/test_contours.py` skip there; run them with 64-bit Python (`python -m unittest tests.test_contours`).
+
 **Voice Switching**:
 - `LangChangeCommand` triggers voice changes via `_resolve_voice_for_language`
 - Maintains `_defaultVoice` vs `curvoice` to track language overrides
@@ -179,6 +199,8 @@ eloquence_64/
 │       ├── _dictionary_update.py       # Dictionary Update: download, merge rules, atomic writes
 │       ├── _background_work.py         # Runs update work off NVDA's UI thread behind a progress dialog
 │       ├── _eci_engine.py              # Shared ECI wrapper (both backends)
+│       ├── _contours.py                # Eloquence Contours: setting -> mode, adapter loading
+│       ├── contours/                   # BUILT by build_contours.cmd (gitignored)
 │       ├── _eloquence_ipc.py           # Host Channel helpers
 │       ├── eloquence_host32/           # BUILT by build_host.cmd (gitignored)
 │       │   ├── eloquence_host32.exe    # PyInstaller onedir launcher
@@ -196,7 +218,8 @@ eloquence_64/
 │           ├── chsrom.dll, jpnrom.dll, korrom.dll  # Asian ROM DLLs (in repo)
 │           └── multiprocessing/        # Bundled multiprocessing package
 ├── site_scons/                         # SCons build tools (NVDATool)
-├── AltIBMTTSDictionaries/              # Git submodule with pronunciation dictionaries
+├── build_contours.cmd                  # Builds Eloquence Contours from the submodule with cargo
+├── eloquence-contours/                 # Git submodule: Nick6489/eloquence-contours
 └── .gitignore
 ```
 

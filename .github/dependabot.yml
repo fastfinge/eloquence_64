@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Opens a pull request whenever Nick6489/eloquence-contours moves, so the
+  # commit releases build from follows upstream without anyone remembering to.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: daily

@@ -1,0 +1,3 @@
+[submodule "eloquence-contours"]
+	path = eloquence-contours
+	url = https://github.com/Nick6489/eloquence-contours.git

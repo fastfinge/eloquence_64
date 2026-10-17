@@ -15,6 +15,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          submodules: true
 
       - name: Set up 64-bit Python 3.13
         id: py64
@@ -74,6 +75,15 @@ jobs:
         shell: cmd
         env:
           PYTHON32: ${{ steps.py32.outputs.python-path }}
+
+      # Same policy as openevv above: a published release ships the commit the
+      # eloquence-contours submodule is pinned to, and every other build takes
+      # upstream master, so an upstream change shows up here before a release
+      # carries it.  Dependabot keeps the pin itself moving.  The runner image
+      # already has Rust's x86_64-pc-windows-msvc toolchain.
+      - name: Build Eloquence Contours
+        run: build_contours.cmd ${{ github.event_name != 'release' && '--latest' || '' }}
+        shell: cmd
 
       - name: Build addon
         run: scons.bat && scons.bat pot

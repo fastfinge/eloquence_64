@@ -97,6 +97,24 @@ if not is_pe32_plus(openevv_dll):
 	)
 	Exit(1)
 
+# Eloquence Contours, built from the eloquence-contours submodule.  Applied in
+# NVDA's own process, so it must be 64-bit whichever engine produced the audio.
+contours_dll = addonDir / "synthDrivers" / "contours" / "eloquence_contours.dll"
+if not contours_dll.exists():
+	print(
+		f"ERROR: {contours_dll} not found.\nRun `build_contours.cmd` to build Eloquence Contours.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
+if not is_pe32_plus(contours_dll):
+	print(
+		f"ERROR: {contours_dll} is not a 64-bit PE image.\n"
+		"64-bit NVDA cannot load it. Re-run `build_contours.cmd`.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
 # --- Generate manifest ----------------------------------------------------
 
 manifest = env.NVDAManifest(env.File(str(addonDir / "manifest.ini")), "manifest.ini.tpl")
