@@ -29,7 +29,7 @@ _Avoid_: say all, continuous speech, read all
 ### Eloquence Runtime
 
 **Eloquence Engine**:
-A speech synthesis runtime exposing the ECI interface, with its voice data, that turns Eloquence commands and text into audio. Either the proprietary 32-bit ECI.DLL or the openevv Engine.
+A speech synthesis runtime exposing the ECI interface, with its voice data, that turns Eloquence commands and text into audio. The proprietary 32-bit ECI.DLL, the openevv Engine, or the ReLoq C Engine.
 _Avoid_: DLL, ECI, host
 
 **Engine Backend**:
@@ -37,15 +37,19 @@ One of the two ways the Synth Driver side reaches an Eloquence Engine: the Eloqu
 _Avoid_: mode, engine, driver, path, transport
 
 **Direct Backend**:
-The Engine Backend that loads a 64-bit Eloquence Engine inside NVDA's own process, with no Eloquence Host Process and no Host Channel.
+The Engine Backend that loads a 64-bit Eloquence Engine inside NVDA's own process, with no Eloquence Host Process and no Host Channel. The user picks at most one engine for it: the openevv Engine or the ReLoq C Engine.
 _Avoid_: in-process mode, direct mode, native mode, openevv mode
 
 **openevv Engine**:
 The MIT-licensed reimplementation of IBM's Embedded ViaVoice that ships a 64-bit library exporting the ECI names, fetched at build time and loaded by the Direct Backend.
 _Avoid_: openevv, open evv, the new engine, the 64-bit DLL
 
+**ReLoq C Engine**:
+hozosch/Reloq-C's independent C engine, whose 64-bit library has an ECI-shaped interface that differs from ECI in voice parameters, language switching, text input and dictionaries. It is taken out of ReLoq C's own NVDA add-on at build time and loaded by the Direct Backend.
+_Avoid_: ReLoq, Reloq, reloqC, the C engine
+
 **Engine Language Coverage**:
-The set of Voice Identities an Eloquence Engine reports it can create, read from the engine at speech-driver start rather than hardcoded. A Voice Identity outside the Direct Backend's coverage is served by the Eloquence Host Process instead.
+The set of Voice Identities an Eloquence Engine reports it can create, read from the engine at speech-driver start rather than hardcoded. The ReLoq C Engine's enumeration reports nothing by design, so its coverage is read by asking it to create each one. A Voice Identity outside the Direct Backend's coverage is served by the Eloquence Host Process instead.
 _Avoid_: supported languages, available languages, language list
 
 **Engine Fallback**:
