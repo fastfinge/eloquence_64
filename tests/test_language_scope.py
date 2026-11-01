@@ -131,8 +131,10 @@ class _EloquenceStub(types.ModuleType):
 		self._generation = 1
 		self.current_generation = lambda: self._generation
 		# These tests cover the proprietary engine's routing, so no fragment goes
-		# to the in-process backend and none gets the openevv bracket workaround.
-		self.voice_uses_direct_backend = lambda voice_id: False
+		# to an in-process backend and none gets an engine's Text Builder options.
+		self.OPENEVV = "openevv"
+		self.RELOQ = "reloq"
+		self.direct_engine_for_voice = lambda voice_id: None
 		self.stopped = False
 		self.processed = False
 		self.immediate_calls = []

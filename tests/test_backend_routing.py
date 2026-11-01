@@ -140,6 +140,17 @@ class BackendRoutingTests(unittest.TestCase):
 			with self.subTest(voice=voice):
 				self.assertIs(self.module.backend_for_voice(voice), self.host)
 
+	def test_text_options_follow_the_engine_that_speaks_the_fragment(self):
+		# The Text Builder picks the openevv bracket fixes or ReLoq C's UTF-8 from
+		# this, so a language the engine lacks must get neither.
+		for engine in (self.module.OPENEVV, self.module.RELOQ):
+			with self.subTest(engine=engine):
+				self.module._direct_engine = engine
+				self.assertEqual(self.module.direct_engine_for_voice(ENU), engine)
+				self.assertIsNone(self.module.direct_engine_for_voice(DEU))
+		self.module._direct_client = None
+		self.assertIsNone(self.module.direct_engine_for_voice(ENU))
+
 	def test_an_unparsable_voice_id_falls_back_to_the_host(self):
 		for voice in (None, "not-a-voice", object()):
 			with self.subTest(voice=voice):
@@ -288,7 +299,7 @@ class EngineSelectionDefaultTests(unittest.TestCase):
 
 	def _with_conf(self, section):
 		self.module.config.conf = {"eloquence": section} if section is not None else {}
-		return self.module.openevv_enabled()
+		return self.module.selected_direct_engine() == self.module.OPENEVV
 
 	def test_a_fresh_install_uses_the_host(self):
 		# No config at all, and a config section that predates the setting.
@@ -318,6 +329,24 @@ class EngineSelectionDefaultTests(unittest.TestCase):
 			with self.subTest(value=value):
 				self.assertFalse(self._with_conf({"use_openevv": value}))
 
+	def test_the_engine_choice_names_the_engine(self):
+		for value, expected in (("openevv", "openevv"), ("reloq", "reloq"), (" ReLoq ", "reloq")):
+			with self.subTest(value=value):
+				self.module.config.conf = {"eloquence": {"direct_engine": value}}
+				self.assertEqual(self.module.selected_direct_engine(), expected)
+
+	def test_the_engine_choice_overrides_the_old_checkbox(self):
+		# Choosing the helper alone in the new combo box must win over a
+		# use_openevv left behind by the checkbox it replaced.
+		self.module.config.conf = {"eloquence": {"direct_engine": "none", "use_openevv": True}}
+		self.assertIsNone(self.module.selected_direct_engine())
+
+	def test_an_unknown_engine_choice_falls_back_to_the_host(self):
+		for value in ("", "espeak", "True"):
+			with self.subTest(value=value):
+				self.module.config.conf = {"eloquence": {"direct_engine": value}}
+				self.assertIsNone(self.module.selected_direct_engine())
+
 
 class DirectInitializePayloadTests(unittest.TestCase):
 	"""What the in-process backend changes about an initialize payload, and what not."""
@@ -342,6 +371,19 @@ class DirectInitializePayloadTests(unittest.TestCase):
 		)
 		self.assertNotEqual(payload["eciPath"], r"C:\eci.dll")
 		self.assertFalse(payload["rewriteIni"])
+
+	def test_openevv_gets_wideband_and_reloq_gets_its_adapter(self):
+		base = {"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
+		openevv = self.module._direct_initialize_payload(base, self.module.OPENEVV)
+		reloq = self.module._direct_initialize_payload(base, self.module.RELOQ)
+		self.assertTrue(openevv["wideband"])
+		self.assertNotIn("reloq", openevv)
+		self.assertTrue(reloq["reloq"])
+		self.assertNotIn("wideband", reloq)
+		self.assertEqual(Path(openevv["eciPath"]).parent.name, "openevv")
+		self.assertEqual(Path(reloq["eciPath"]).parent.name, "reloq")
+		# Both engines read the add-on's own dictionaries.
+		self.assertEqual(reloq["dataDirectory"], r"C:\dicts")
 
 	def test_the_callers_payload_is_not_mutated(self):
 		# The host is initialized from the same stored payload and must still see

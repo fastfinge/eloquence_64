@@ -796,8 +796,8 @@ class EloquenceHostClient(EngineClient):
 class DirectEngineClient(EngineClient):
 	"""Drives an ECI-compatible engine inside NVDA's own process.
 
-	Used for openevv's 64-bit eci.dll, which needs no Eloquence Host Process and
-	no Host Channel.  It speaks the same Host Command protocol as the host
+	Used for a 64-bit eci.dll -- openevv's or ReLoq C's, whichever the user chose
+	-- which needs no Eloquence Host Process and no Host Channel.  It speaks the same Host Command protocol as the host
 	backend, executed by the shared EciDispatcher, so both backends answer every
 	command through one implementation.
 
@@ -829,7 +829,7 @@ class DirectEngineClient(EngineClient):
 		if self._dispatcher is not None:
 			return
 		if not os.path.exists(self._eci_path):
-			raise RuntimeError(f"openevv engine not found at {self._eci_path}")
+			raise RuntimeError(f"In-process engine not found at {self._eci_path}")
 		LOGGER.info("Loading the Eloquence Engine in process from %s", self._eci_path)
 		self._dispatcher = _engine.EciDispatcher(self._handle_event_kwargs)
 
@@ -892,14 +892,25 @@ class DirectEngineClient(EngineClient):
 		self._dispatcher = None
 
 
-def openevv_engine_path() -> str:
-	"""Where fetch_eci.py installs the openevv engine inside the add-on."""
-	return os.path.join(os.path.abspath(os.path.dirname(__file__)), "openevv", "eci.dll")
+# The 64-bit engines the Direct Backend can load, by the name each is stored
+# under in config and installed under by fetch_eci.py.  At most one is live at a
+# time; whatever it cannot speak falls back to the Eloquence Host Process.
+OPENEVV = "openevv"
+RELOQ = "reloq"
+DIRECT_ENGINE_NAMES = {
+	OPENEVV: "openevv",
+	RELOQ: "ReLoq C",
+}
 
 
-def openevv_version() -> Optional[str]:
-	"""The openevv release the add-on was built against, for the settings panel."""
-	path = os.path.join(os.path.dirname(openevv_engine_path()), "openevv-version.txt")
+def direct_engine_path(engine: str) -> str:
+	"""Where fetch_eci.py installs *engine*'s eci.dll inside the add-on."""
+	return os.path.join(os.path.abspath(os.path.dirname(__file__)), engine, "eci.dll")
+
+
+def direct_engine_version(engine: str) -> Optional[str]:
+	"""The *engine* build the add-on carries, for the settings panel."""
+	path = os.path.join(os.path.dirname(direct_engine_path(engine)), f"{engine}-version.txt")
 	try:
 		with open(path, encoding="utf-8") as f:
 			return f.read().strip() or None
@@ -907,11 +918,17 @@ def openevv_version() -> Optional[str]:
 		return None
 
 
+def direct_engine_available(engine: str) -> bool:
+	return os.path.exists(direct_engine_path(engine))
+
+
 _pipeline = AudioPipeline()
 _client = EloquenceHostClient(_pipeline)
-# Created only when openevv is selected; both backends can be live at once, since
-# openevv serves the languages it has and the host serves the rest.
+# Created only when an in-process engine is selected; both backends can be live
+# at once, since that engine serves the languages it has and the host the rest.
 _direct_client: Optional[DirectEngineClient] = None
+# Which of DIRECT_ENGINE_NAMES _direct_client is running, or None.
+_direct_engine: Optional[str] = None
 # The backend the next Host Command goes to.  Switched per fragment by
 # set_voice(), which is the only place a Voice Identity changes.
 _active: EngineClient = _client
@@ -919,7 +936,7 @@ _active: EngineClient = _client
 # Empty means "use the host for everything", so a failed enumeration degrades to
 # today's behaviour rather than to silence.
 _direct_languages: frozenset = frozenset()
-# Output rates openevv reported, enumerated at initialize() so the combo box can
+# Output rates the in-process engine reported, enumerated at initialize() so the combo box can
 # list them even while the Direct Backend is still asleep.  The Eloquence Host
 # Process reports its own in its initialize response instead, since nothing on
 # this side can load a 32-bit library to ask.
@@ -939,22 +956,27 @@ _synth_worker_stop = threading.Event()
 
 
 # Backend routing ----------------------------------------------------------------
-def openevv_enabled() -> bool:
-	"""Whether the user asked for the in-process openevv engine.
+def selected_direct_engine() -> Optional[str]:
+	"""Which in-process engine the user asked for, or None for the host alone.
 
 	The Eloquence Host Process is the default, and stays the default for any
-	value this cannot read as an explicit yes.  NVDA stores this section without
-	a confspec, so the value comes back as a string: ``bool("False")`` is True,
-	which would have turned the engine on for a user who had just turned it off.
+	value this cannot read.  ``direct_engine`` names the engine; a config from
+	before ReLoq C has only the ``use_openevv`` checkbox, which still counts.
+	NVDA stores this section without a confspec, so values come back as strings:
+	``bool("False")`` is True, which would have turned openevv on for a user who
+	had just turned it off.
 	"""
-	raw = config.conf.get("eloquence", {}).get("use_openevv", False)
+	section = config.conf.get("eloquence", {})
+	engine = section.get("direct_engine")
+	if engine is not None:
+		engine = str(engine).strip().lower()
+		return engine if engine in DIRECT_ENGINE_NAMES else None
+	raw = section.get("use_openevv", False)
 	if isinstance(raw, str):
-		return raw.strip().lower() in {"true", "yes", "on", "1"}
-	return bool(raw)
-
-
-def openevv_available() -> bool:
-	return os.path.exists(openevv_engine_path())
+		enabled = raw.strip().lower() in {"true", "yes", "on", "1"}
+	else:
+		enabled = raw is True or raw == 1
+	return OPENEVV if enabled else None
 
 
 def direct_languages() -> frozenset:
@@ -994,16 +1016,17 @@ def current_generation() -> int:
 	return _pipeline.sequence
 
 
-def voice_uses_direct_backend(voice_id) -> bool:
-	"""Whether *voice_id* will be spoken by the in-process engine.
+def direct_engine_for_voice(voice_id) -> Optional[str]:
+	"""Which in-process engine will speak *voice_id*, or None for the host.
 
-	The Eloquence Text Builder needs this per fragment, because the openevv
-	bracket workaround must not be applied to text bound for the proprietary
-	engine, which does not have the bug.
+	The Eloquence Text Builder needs this per fragment, because what it does for
+	one engine must not reach another: the openevv bracket workaround would be
+	wrong on the proprietary engine, which does not have the bug, and the UTF-8
+	that ReLoq C takes would be garbage to either of the others.
 	"""
-	if _direct_client is None:
-		return False
-	return backend_for_voice(voice_id) is _direct_client
+	if _direct_client is None or backend_for_voice(voice_id) is not _direct_client:
+		return None
+	return _direct_engine
 
 
 def _activate(backend: EngineClient) -> None:
@@ -1042,25 +1065,31 @@ def _activate(backend: EngineClient) -> None:
 	_pipeline.request_rate(backend.sample_rate)
 
 
-def _direct_initialize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-	"""Retarget an initialize payload at the in-process openevv engine.
+def _direct_initialize_payload(payload: Dict[str, Any], engine: Optional[str] = None) -> Dict[str, Any]:
+	"""Retarget an initialize payload at the in-process engine.
 
-	Only three things differ from the host's payload: which library to load;
-	that openevv resolves its own data relative to that library and ships an
-	eci.ini needing none of the C:\\dummy\\ rewriting the proprietary ECI.INI does;
-	and that eciWideband is turned on, an openevv parameter the proprietary
-	engine does not have (see _eci_engine.ECI_WIDEBAND).
+	Only a few things differ from the host's payload: which library to load;
+	that both 64-bit engines resolve their own data relative to that library and
+	need none of the C:\\dummy\\ rewriting the proprietary ECI.INI does; and one
+	engine-specific switch -- eciWideband for openevv (see
+	_eci_engine.ECI_WIDEBAND), and for ReLoq C the flag that adapts the wrapper
+	to it (see _eci_engine.EngineConfig.reloq).
 
 	``dataDirectory`` is passed through unchanged, and deliberately so.  It points
 	at the proprietary engine's directory, where the .dic files live, which is
 	where both backends read them from regardless of which library is loaded.
 	openevv v0.3 could not use them -- see _load_dictionaries() -- but the build
-	no longer ships v0.3.
+	no longer ships v0.3.  ReLoq C reads the same files, through its own
+	eciSetDictionaryPath.
 	"""
+	engine = engine or _direct_engine or OPENEVV
 	payload = dict(payload)
-	payload["eciPath"] = openevv_engine_path()
+	payload["eciPath"] = direct_engine_path(engine)
 	payload["rewriteIni"] = False
-	payload["wideband"] = True
+	if engine == RELOQ:
+		payload["reloq"] = True
+	else:
+		payload["wideband"] = True
 	return payload
 
 
@@ -1215,7 +1244,7 @@ def _sync_eci_ini_paths(eloquence_dir):
 
 
 def initialize(indexCallback=None):
-	global onIndexReached, _direct_client, _direct_languages, _active, _engine_initialize_payload
+	global onIndexReached, _direct_client, _direct_engine, _direct_languages, _active, _engine_initialize_payload
 	global _direct_sample_rates, _requested_sample_rate
 	eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
 	# Repair ECI.INI before the host loads the engine so voices resolve no
@@ -1251,38 +1280,51 @@ def initialize(indexCallback=None):
 	# anything to it.  An engine that cannot be loaded or enumerated leaves
 	# _direct_languages empty, which routes everything to the host.
 	_direct_client = None
+	_direct_engine = None
 	_direct_languages = frozenset()
 	_direct_sample_rates = ()
-	if openevv_enabled():
-		if not openevv_available():
+	engine = selected_direct_engine()
+	if engine is not None:
+		name = DIRECT_ENGINE_NAMES[engine]
+		path = direct_engine_path(engine)
+		if not direct_engine_available(engine):
 			LOGGER.warning(
-				"openevv was selected but no engine is present at %s; using the "
+				"%s was selected but no engine is present at %s; using the "
 				"Eloquence Host Process instead",
-				openevv_engine_path(),
+				name,
+				path,
 			)
 		else:
-			languages = _engine.available_languages(openevv_engine_path())
+			languages = _engine.available_languages(path)
+			if not languages and engine == RELOQ:
+				# ReLoq C's enumeration reports nothing by design; see
+				# _engine.constructible_languages().
+				languages = _engine.constructible_languages(path)
 			if languages:
-				_direct_client = DirectEngineClient(_pipeline, openevv_engine_path())
+				_direct_client = DirectEngineClient(_pipeline, path)
+				_direct_engine = engine
 				_direct_languages = languages
 				# Enumerated here rather than when the backend starts, because the
-				# combo box has to list openevv's rates even in a session where
+				# combo box has to list the engine's rates even in a session where
 				# the configured voice keeps the Direct Backend asleep.
-				_direct_sample_rates = _engine.available_sample_rates(openevv_engine_path())
+				_direct_sample_rates = _engine.available_sample_rates(path)
 				LOGGER.info(
-					"openevv offers sample rates: %s",
+					"%s offers sample rates: %s",
+					name,
 					", ".join(str(rate) for rate in _direct_sample_rates) or "none reported",
 				)
 				LOGGER.info(
-					"openevv reports %d language(s): %s",
+					"%s reports %d language(s): %s",
+					name,
 					len(languages),
 					", ".join(sorted(_engine.LANG_BY_ID.get(i, hex(i)) for i in languages)),
 				)
 			else:
 				LOGGER.warning(
-					"openevv at %s reported no languages; using the Eloquence "
+					"%s at %s reported no languages; using the Eloquence "
 					"Host Process instead",
-					openevv_engine_path(),
+					name,
+					path,
 				)
 
 	# Start on whichever backend owns the configured voice, so an English-only
@@ -1442,7 +1484,7 @@ def close_audio():
 
 
 def terminate():
-	global _direct_client, _active
+	global _direct_client, _direct_engine, _active
 	_pipeline.close_audio()
 	for backend in (_client, _direct_client):
 		if backend is not None and backend.started:
@@ -1451,6 +1493,7 @@ def terminate():
 			except Exception:
 				LOGGER.exception("Failed to shut down %s", type(backend).__name__)
 	_direct_client = None
+	_direct_engine = None
 	_active = _client
 	_stop_synth_worker()
 

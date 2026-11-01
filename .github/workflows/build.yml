@@ -71,9 +71,11 @@ jobs:
       # carries it.  That download needs a token with actions:read on
       # Mudb0y/openevv, which a workflow's own GITHUB_TOKEN does not carry across
       # repositories, so OPENEVV_CI_TOKEN (a PAT) is what actually works;
-      # fetch_eci.py says so explicitly if the download is refused.
+      # fetch_eci.py says so explicitly if the download is refused.  ReLoq C
+      # follows the same policy, but falls back to its newest release when no CI
+      # artifact is reachable, since it only builds one on its release branches.
       - name: Fetch proprietary files
-        run: python fetch_eci.py ${{ github.event_name == 'release' && '--openevv-release' || '' }}
+        run: python fetch_eci.py ${{ github.event_name == 'release' && '--openevv-release --reloq-release' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.OPENEVV_CI_TOKEN || secrets.GITHUB_TOKEN }}
 

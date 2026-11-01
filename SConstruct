@@ -97,6 +97,23 @@ if not is_pe32_plus(openevv_dll):
 	)
 	Exit(1)
 
+# The ReLoq C engine, the Direct Backend's other choice.  Checked the same way.
+reloq_dll = addonDir / "synthDrivers" / "reloq" / "eci.dll"
+if not reloq_dll.exists():
+	print(
+		f"ERROR: {reloq_dll} not found.\nRun `python fetch_eci.py` to download the ReLoq C engine.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
+if not is_pe32_plus(reloq_dll):
+	print(
+		f"ERROR: {reloq_dll} is not a 64-bit PE image.\n"
+		"64-bit NVDA cannot load it. Re-run `python fetch_eci.py --force`.",
+		file=sys.stderr,
+	)
+	Exit(1)
+
 # Eloquence Contours, built from the eloquence-contours submodule.  Applied in
 # NVDA's own process, so it must be 64-bit whichever engine produced the audio.
 contours_dll = addonDir / "synthDrivers" / "contours" / "eloquence_contours.dll"

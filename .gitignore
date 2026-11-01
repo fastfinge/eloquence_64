@@ -21,6 +21,10 @@ addon/synthDrivers/eloquence/PTB.SYN
 # is kept out of source control like the proprietary files above.
 addon/synthDrivers/openevv/
 
+# ReLoq C engine, fetched at build time by fetch_eci.py out of ReLoq C's own NVDA
+# add-on.  Its repository states no licence, so it stays out of source control.
+addon/synthDrivers/reloq/
+
 # Eloquence Contours, built from the eloquence-contours submodule by
 # build_contours.cmd.  The adapter is copied too, so upstream changes to it
 # arrive with the DLL they belong to.

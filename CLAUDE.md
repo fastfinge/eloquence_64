@@ -28,7 +28,7 @@ This repo uses a single-context domain-doc layout. See `docs/agents/domain.md`.
 ```bash
 winget install --id astral-sh.uv
 py install 3.13-32
-python fetch_eci.py          # Downloads proprietary ECI.DLL + .SYN files, plus openevv's 64-bit eci.dll
+python fetch_eci.py          # Downloads proprietary ECI.DLL + .SYN files, plus openevv's and ReLoq C's 64-bit eci.dll
 ```
 
 ### Building the Add-on
@@ -70,7 +70,7 @@ scons.bat
 
 ### Two engine backends
 
-The add-on can reach an Eloquence Engine two ways, selected by a checkbox in the Eloquence settings category:
+The add-on can reach an Eloquence Engine two ways, selected by the "64-bit engine" choice in the Eloquence settings category (`config.conf["eloquence"]["direct_engine"]`: `none`, `openevv` or `reloq`; an older config's `use_openevv` checkbox still counts as `openevv`):
 
 - **Eloquence Host Process (32-bit)**: `host_eloquence32.py`, compiled to the `eloquence_host32/` onedir tree. Loads the proprietary `ECI.DLL`, which is 32-bit only, and talks to NVDA over the **Host Channel**. Supports all 13 languages.
 - **Direct Backend (in-process, 64-bit)**: loads openevv's 64-bit `eci.dll` inside NVDA itself. No process, no IPC. openevv supports **US English only** so far. Published releases take openevv's newest release (v0.4 is the first with the `eciStop` fix); every other build, local or CI, takes openevv's newest CI artifact so an upstream change shows up before a release ships it. See `fetch_eci.py`.
@@ -78,6 +78,21 @@ The add-on can reach an Eloquence Engine two ways, selected by a checkbox in the
 Because openevv's language coverage is narrower, both backends can be live at once: a Voice Identity openevv reports is spoken in process, and anything else falls back to the Eloquence Host Process. The available set is read from `eciGetAvailableLanguages` at run time, never hardcoded, so an openevv release that adds a language starts serving it with no code change here. An empty or failed enumeration degrades to host-only rather than to silence.
 
 The Eloquence Host Process is started lazily, so a user who only speaks a language openevv has never spawns it.
+
+**ReLoq C** ([hozosch/Reloq-C](https://github.com/hozosch/Reloq-C)) is the Direct Backend's other engine, and covers all 13 languages, so with it chosen the host is never started. It is an independent C engine with an ECI-*shaped* 64-bit `eci.dll`, not a drop-in, and `EngineConfig.reloq` adapts `EciEngine` to it. Every difference below was measured against ReLoq C 1.0.1:
+- **No `eciSetVoiceParam`/`eciGetVoiceParam`/`eciCopyVoice`.** The voice is set through its own parameters on `eciSetParam` (`RELOQ_VOICE_PARAMS`, 0x1007-0x1010, with the same ranges as ECI's), and variants are applied from `RELOQ_VOICE_PRESETS`, its own table for the same eight presets. Rate is left alone, as `eciCopyVoice` leaves it.
+- **Its pitch parameter is read only when it synthesizes**, so NVDA's capital-letter raise and its reset, both queued before synthesis, collapsed to the reset (114.8 Hz with or without the raise). A *temporary* pitch therefore goes in as `eciInsertPitch`, a mark at its place in the text that ends with the utterance (235 Hz). The base pitch still uses the parameter. Temporary rate and volume have no such call, so a mid-utterance `RateCommand` or `VolumeCommand` takes effect for the whole utterance or not at all. NVDA rarely sends either, and inline `` `vs ``/`` `vv `` would bring back the pause described below.
+- **`eciSetParam(9)` is refused** for any language but the handle's own, so there is one handle per language, created on first use and brought up to the current voice, gender, sample rate and shared output buffer.
+- **`eciSynthesize` fails on every language until `RELOQ_GENERIC_VOICE` (0x1003) is on**, and backquote commands are spoken until `RELOQ_PROCESS_TAGS` (0x100b) is on. It refuses `ECI_INPUT_TYPE`. With tags on, the Text Builder's whole preamble (`` `pp `da `vv `p0 `p1 ``) is obeyed.
+- **Its `eciAddText` decodes everything as cp1252**, so the Text Builder encodes ReLoq C fragments as UTF-8 (`BuildOptions.utf8`, set per fragment like `openevv_bracket_fixes`) and `add_text` passes them to `eciAddTextUtf8`. The per-language Engine Encodings would garble every CJK fragment.
+- **`eciGetAvailableLanguages` reports nothing by design.** Its `eciNewEx` returns null for a language it lacks, so `constructible_languages()` asks it to create each one. That is the engine's answer, not a hardcoded list; the openevv rule that an empty enumeration means host-only is unchanged.
+- **Dictionaries load through `eciSetDictionaryPath(dir)`**, which reads the same `ENUmain.dic`/`ENURoot.dic`/`ENUabbr.dic` names, so `dataDirectory` is passed through as for openevv. Confirmed working in NVDA ("Hermione"). `omg`/`WWII` measured the same with and without them, because those come from the abbreviation dictionary, which is off by default.
+- **An inline voice change part way through an utterance is a phrase boundary**: `` `vv `` or `` `vs `` opening a second fragment added 0.43 s (4708 samples) of silence where the proprietary engine adds none. NVDA splits text into fragments at every `CharacterModeCommand`, which is how it speaks a keyboard shortcut ("Alt+" then "a" in a dialog), so the pause was heard there and not in the same text typed into Notepad. ReLoq C fragments therefore carry no `` `vv `` (`BuildOptions.inline_volume=False`); the volume reaches it through its parameter, which measured identical. `` `pp ``, `` `da `` and `` `p0 ``/`` `p1 `` do not cause it.
+- **Its volume only works between 80 and 100.** The volume parameter and inline `` `vv `` behave identically, and anything below 80 sounds the same as 80; even 0 is not silent. Its linear "generic" volume (`0x1006`) is ignored once tag processing is on, which the add-on needs. An upstream limitation, not worked around here.
+- It has no parameters 41/42 (the inline `` `da ``/`` `pp `` carry those), no wideband, and none of openevv's bracket-naming bug (`( x )` and `(x)` measure identically), so neither bracket rewrite is applied.
+- All seven sample rates are accepted on a live handle, with a new output buffer, so the rate machinery needs nothing special beyond applying to every handle.
+
+ReLoq C publishes no standalone DLL. `fetch_eci.py` takes `synthDrivers/reloqC/eci.dll` and `doc/licenses/*` out of its `.nvda-addon` into `addon/synthDrivers/reloq/` (gitignored), with `reloq-version.txt`. The update policy mirrors openevv's (`--reloq-release` on a published release), except that its CI only builds the add-on on its `codex/release*` branches with 14-day retention, so a development build falls back to its newest release when no artifact or token is available. **Its repository states no licence**, which is why it stays out of source control.
 
 ### Shared engine wrapper
 
@@ -205,6 +220,10 @@ eloquence_64/
 │       ├── eloquence_host32/           # BUILT by build_host.cmd (gitignored)
 │       │   ├── eloquence_host32.exe    # PyInstaller onedir launcher
 │       │   └── _internal/              # Its runtime; the exe will not run without it
+│       ├── reloq/                      # FETCHED by fetch_eci.py (gitignored)
+│       │   ├── eci.dll                     # ReLoq C 64-bit engine, loaded in process
+│       │   ├── *-LICENSE.txt, *-NOTICE.txt # Notices shipped with it upstream
+│       │   └── reloq-version.txt           # Which ReLoq C build or tag this build carries
 │       ├── openevv/                    # FETCHED by fetch_eci.py (gitignored)
 │       │   ├── eci.dll                 # openevv 64-bit engine, loaded in process
 │       │   ├── eci.ini                 # Needs no rewriting, unlike ECI.INI
