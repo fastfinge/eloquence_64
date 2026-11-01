@@ -48,6 +48,20 @@ class BuildOptions:
 	# whitespace one in attach_spaced_brackets(), and the Pause Policy's command
 	# placement in _insert_pause_commands().
 	openevv_bracket_fixes: bool = False
+	# Set only for the in-process ReLoq C backend, which takes UTF-8 for every
+	# language through eciAddTextUtf8 and reads its plain eciAddText as cp1252,
+	# so the per-language Engine Encodings below would garble anything outside
+	# cp1252 -- every Chinese, Japanese and Korean fragment among them.
+	utf8: bool = False
+	# Cleared only for ReLoq C, which takes any inline voice change -- `vv or
+	# `vs -- part way through an utterance as a phrase boundary and pauses
+	# there: a second fragment opening with `vv100 added 0.43 s of silence
+	# (4708 samples at 11025 Hz) between "Alt+" and "a", where the proprietary
+	# engine adds none.  NVDA splits text into fragments at every
+	# CharacterModeCommand, which is how a keyboard shortcut is spoken.  The
+	# volume reaches ReLoq C through its own parameter anyway, and measured
+	# exactly the same with the inline command as without it.
+	inline_volume: bool = True
 
 
 def _insert_pause_commands(text: str, command: str, protect_closing_brackets: bool) -> str:
@@ -81,7 +95,9 @@ def _insert_pause_commands(text: str, command: str, protect_closing_brackets: bo
 	return pause_re.sub(replace, text)
 
 
-def _engine_encode(text: str, voice_id) -> bytes:
+def _engine_encode(text: str, voice_id, utf8: bool = False) -> bytes:
+	if utf8:
+		return text.encode("utf-8", errors="replace")
 	encoding = _ENGINE_ENCODINGS.get(voice_id)
 	if encoding is not None:
 		return text.encode(encoding, errors="replace")
@@ -106,7 +122,8 @@ def build(text: str, voice_id: int, options: BuildOptions) -> bytes:
 		text = _text_preprocessing.attach_spaced_brackets(text)
 	if not options.backquote_tags:
 		text = text.replace("`", " ")
-	text = f"`vv{options.volume} {text}"
+	if options.inline_volume:
+		text = f"`vv{options.volume} {text}"
 	if options.pause_mode == 0:
 		text = _insert_pause_commands(text, "`p0", options.openevv_bracket_fixes)
 	elif options.pause_mode == 2:
@@ -114,7 +131,7 @@ def build(text: str, voice_id: int, options: BuildOptions) -> bytes:
 	text = time_re.sub(r"\1:\2 \3", text)
 	text = f"`da{int(options.abbreviation_dict)} {text}"
 	text = f"`pp{int(options.phrase_prediction)} {text}"
-	return _engine_encode(text, voice_id)
+	return _engine_encode(text, voice_id, options.utf8)
 
 
 def break_fragment(time_ms: int, options: BuildOptions) -> bytes:

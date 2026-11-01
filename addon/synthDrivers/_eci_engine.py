@@ -5,8 +5,9 @@ This module is imported by two different processes with two different bitnesses:
 * The Eloquence Host Process (32-bit, frozen by PyInstaller) uses it to drive the
   proprietary 32-bit ``ECI.DLL``, and forwards engine events over the Host
   Channel.
-* The Synth Driver side (64-bit, in NVDA's own process) uses it to drive
-  openevv's 64-bit ``eci.dll`` directly, with no host process and no IPC.
+* The Synth Driver side (64-bit, in NVDA's own process) uses it to drive a
+  64-bit ``eci.dll`` directly, with no host process and no IPC: openevv's, or
+  ReLoq C's (see EngineConfig.reloq for how far that one is from a drop-in).
 
 Two rules keep that dual use working, and both are asserted by the test suite
 rather than left to convention:
@@ -31,6 +32,7 @@ from ctypes import (
 	c_char_p,
 	c_int,
 	c_short,
+	c_size_t,
 	c_void_p,
 	cast,
 )
@@ -73,6 +75,10 @@ ECI_SIGNATURES = {
 	"eciSetDict": ([c_void_p, c_void_p], c_int),
 	"eciLoadDict": ([c_void_p, c_void_p, c_int, c_char_p], c_int),
 	"eciDeleteDict": ([c_void_p, c_void_p], c_int),
+	# ReLoq C's own entry points; see EngineConfig.reloq.
+	"eciAddTextUtf8": ([c_void_p, c_char_p, c_size_t, c_int], c_int),
+	"eciSetDictionaryPath": ([c_void_p, c_char_p], c_int),
+	"eciInsertPitch": ([c_void_p, c_int], c_int),
 	# Queried by available_languages() on a freshly loaded library, before any
 	# engine exists, so it is declared there rather than here.
 }
@@ -185,6 +191,45 @@ SAMPLE_RATE_VALUES: Dict[int, int] = {
 # such parameter.
 ECI_WIDEBAND = 32
 
+# ReLoq C (hozosch/Reloq-C) parameters, none of which IBM's ECI has.  Its eci.dll
+# exports the ECI shape but not the voice half of it: there is no
+# eciSetVoiceParam, eciGetVoiceParam or eciCopyVoice, and the voice is set
+# through these parameters on eciSetParam instead.  Measured against ReLoq C
+# 1.0.1, each takes the same range as its ECI counterpart (rate 0..250, the rest
+# 0..100, gender 0/1) and reads back through eciGetParam.
+#
+# RELOQ_GENERIC_VOICE has to be on, or eciSynthesize fails on every language:
+# the default "exact" voice only covers a German subset.  RELOQ_PROCESS_TAGS is
+# its counterpart of ECI_INPUT_TYPE (which it refuses); without it the backquote
+# commands the Eloquence Text Builder adds are spoken rather than obeyed.
+RELOQ_GENERIC_VOICE = 0x1003
+RELOQ_PROCESS_TAGS = 0x100B
+RELOQ_GENDER = 0x1010
+RELOQ_VOICE_PARAMS: Dict[int, int] = {
+	RATE: 0x1007,
+	PITCH: 0x1008,
+	FLUCTUATION: 0x1009,
+	VLM: 0x100A,
+	HSZ: 0x100D,
+	RGH: 0x100E,
+	BTH: 0x100F,
+}
+# What eciCopyVoice would load for each Voice Variant, as (gender, head size,
+# pitch, inflection, roughness, breathiness, volume).  Taken from ReLoq C's own
+# NVDA driver, which uses this add-on's preset names and IDs.  Rate is left
+# alone, as eciCopyVoice leaves it alone on the proprietary engine.
+RELOQ_VOICE_PRESETS: Dict[int, tuple] = {
+	1: (0, 50, 65, 30, 0, 0, 100),  # Reed
+	2: (1, 50, 81, 30, 0, 50, 100),  # Shelly
+	3: (1, 22, 93, 35, 0, 0, 100),  # Bobby
+	4: (0, 86, 56, 47, 0, 0, 100),  # Rocko
+	5: (0, 50, 69, 34, 0, 0, 100),  # Glen
+	6: (1, 56, 89, 35, 0, 40, 100),  # Sandy
+	7: (1, 45, 68, 30, 3, 40, 100),  # Grandma
+	8: (0, 30, 61, 44, 18, 20, 100),  # Grandpa
+}
+_RELOQ_PRESET_PARAMS = (RELOQ_GENDER, HSZ, PITCH, FLUCTUATION, RGH, BTH, VLM)
+
 LANGS: Dict[str, int] = {
 	"esm": 131073,
 	"esp": 131072,
@@ -263,6 +308,14 @@ class EngineConfig:
 	# Turn on openevv's eciWideband; see ECI_WIDEBAND.  Off for the proprietary
 	# engine, which has no such parameter.
 	wideband: bool = False
+	# Drive ReLoq C's eci.dll, which differs from ECI in four ways handled here:
+	# the voice goes through its own parameters (RELOQ_VOICE_PARAMS) and
+	# variants are emulated from RELOQ_VOICE_PRESETS; eciSetParam(9) is refused,
+	# so each language gets a handle of its own; text goes in as UTF-8 through
+	# eciAddTextUtf8, because its eciAddText decodes everything as cp1252; and
+	# dictionaries load through eciSetDictionaryPath, from the same
+	# ENUmain/ENURoot/ENUabbr files, instead of eciNewDict/eciLoadDict.
+	reloq: bool = False
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -293,6 +346,39 @@ def available_languages(dll_path: str) -> frozenset:
 		return frozenset()
 	reported = max(0, min(count.value, _MAX_LANGUAGES))
 	return frozenset(languages[index] for index in range(reported))
+
+
+def constructible_languages(dll_path: str) -> frozenset:
+	"""The Voice IDs in LANGS that an ECI library will create a handle for.
+
+	For ReLoq C, whose eciGetAvailableLanguages deliberately reports nothing
+	("no complete text-to-PCM voice yet") although it speaks every language in
+	LANGS.  Its eciNewEx does refuse a language it lacks, with a null handle,
+	so this is still the engine's own answer rather than a list kept here.
+	Not used for openevv, where an empty enumeration means host-only.
+	"""
+	try:
+		directory = os.path.dirname(os.path.abspath(dll_path))
+		if os.path.isdir(directory):
+			try:
+				os.add_dll_directory(directory)
+			except (OSError, AttributeError):
+				pass
+		dll = ctypes.windll.LoadLibrary(os.path.abspath(dll_path))
+		dll.eciNewEx.argtypes = [c_int]
+		dll.eciNewEx.restype = c_void_p
+		dll.eciDelete.argtypes = [c_void_p]
+		dll.eciDelete.restype = c_void_p
+		found = set()
+		for voice_id in LANGS.values():
+			handle = dll.eciNewEx(voice_id)
+			if handle:
+				found.add(voice_id)
+				dll.eciDelete(handle)
+		return frozenset(found)
+	except Exception:
+		LOGGER.exception("Could not probe languages from %s", dll_path)
+		return frozenset()
 
 
 def available_sample_rates(dll_path: str) -> tuple:
@@ -380,6 +466,11 @@ class EciEngine:
 		self._buffer = (c_short * self._samples)()
 		self._params: Dict[int, int] = {}
 		self._voice_params: Dict[int, int] = {}
+		# ReLoq C only: one handle per Voice ID, since it cannot switch language
+		# on a live one, and the gender a Voice Variant set, which every handle
+		# has to follow.  self._handle is always the active one.
+		self._handles: Dict[int, object] = {}
+		self._gender = 0
 		self._speaking = False
 		self._saw_final_index = False
 		self._pending_indexes: list = []
@@ -418,15 +509,8 @@ class EciEngine:
 		self._declare_signatures()
 
 		language_id = LANGS.get(self._config.language_code, LANGS["enu"])
-		handle = self._dll.eciNewEx(language_id)
-		if not handle:
-			raise RuntimeError(
-				f"Failed to create an Eloquence handle for language "
-				f"{self._config.language_code!r} (0x{language_id:x}) using "
-				f"{self._config.eci_path}"
-			)
+		handle = self._new_handle(language_id)
 		self._handle = handle
-		self._dll.eciRegisterCallback(handle, self._callback, None)
 		self._supported_sample_rates = self._probe_sample_rates()
 		# Before the first eciSetOutputBuffer, so the buffer is sized for the rate
 		# the engine will actually run at.
@@ -436,21 +520,77 @@ class EciEngine:
 		result = self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer)
 		if not result:
 			raise RuntimeError("eciSetOutputBuffer failed")
-		# Allow annotated input so that backquote commands are interpreted instead of spoken.
-		self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
-		self._params[ECI_INPUT_TYPE] = 1
+		if self._config.reloq:
+			self._prepare_reloq_handle(handle)
+			self._handles[language_id] = handle
+		else:
+			# Allow annotated input so that backquote commands are interpreted instead of spoken.
+			self._dll.eciSetParam(handle, ECI_INPUT_TYPE, 1)
+			self._params[ECI_INPUT_TYPE] = 1
 		if self._config.wideband:
 			self._enable_wideband()
 		self._params[ECI_LANGUAGE_PARAM] = self._dll.eciGetParam(handle, ECI_LANGUAGE_PARAM)
 		for param in (RATE, PITCH, VLM, FLUCTUATION):
-			self._voice_params[param] = self._dll.eciGetVoiceParam(handle, 0, param)
+			self._voice_params[param] = self._get_voice_param(param)
 		self._load_dictionaries()
 		if self._config.voice_variant:
 			self.copy_voice(self._config.voice_variant)
+		if self._config.reloq:
+			# ReLoq C has no parameters 41 and 42; the Eloquence Text Builder's
+			# inline `da and `pp commands carry both settings instead.
+			return
 		if self._config.enable_phrase_prediction:
 			self._dll.eciSetParam(handle, 42, 1)
 		if self._config.enable_abbrev_dict:
 			self._dll.eciSetParam(handle, 41, 1)
+
+	def _new_handle(self, language_id: int):
+		handle = self._dll.eciNewEx(language_id)
+		if not handle:
+			raise RuntimeError(
+				f"Failed to create an Eloquence handle for language 0x{language_id:x} "
+				f"using {self._config.eci_path}"
+			)
+		self._dll.eciRegisterCallback(handle, self._callback, None)
+		return handle
+
+	def _prepare_reloq_handle(self, handle) -> None:
+		"""Put a fresh ReLoq C handle into the state every utterance assumes."""
+		for param in (RELOQ_GENERIC_VOICE, RELOQ_PROCESS_TAGS):
+			if self._dll.eciSetParam(handle, param, 1) == -1:
+				raise RuntimeError(f"ReLoq C refused parameter 0x{param:x}")
+		directory = self._config.data_directory
+		if directory and os.path.isdir(directory):
+			if not self._dll.eciSetDictionaryPath(handle, directory.encode("utf-8")):
+				LOGGER.warning("ReLoq C could not load the dictionaries in %s", directory)
+
+	def _switch_reloq_language(self, language_id: int) -> None:
+		"""Make the handle for *language_id* active, creating it on first use.
+
+		The handle is brought up to the voice the user has on the outgoing one --
+		rate, pitch and the rest, and the variant's gender -- and to the same
+		sample rate and output buffer, which all handles share: only one of them
+		ever synthesizes at a time.
+		"""
+		handle = self._handles.get(language_id)
+		if handle is None:
+			handle = self._new_handle(language_id)
+			try:
+				if self._supported_sample_rates:
+					self._dll.eciSetParam(
+						handle, ECI_SAMPLE_RATE, self._supported_sample_rates[self._sample_rate]
+					)
+				if not self._dll.eciSetOutputBuffer(handle, self._samples, self._buffer):
+					raise RuntimeError("eciSetOutputBuffer failed")
+				self._prepare_reloq_handle(handle)
+			except Exception:
+				self._dll.eciDelete(handle)
+				raise
+			self._handles[language_id] = handle
+		self._handle = handle
+		self._dll.eciSetParam(handle, RELOQ_GENDER, self._gender)
+		for param, value in self._voice_params.items():
+			self._set_voice_param(param, value)
 
 	def _enable_wideband(self) -> None:
 		"""Turn on openevv's eciWideband, and leave the engine able to change rate.
@@ -511,9 +651,17 @@ class EciEngine:
 		if not self._supported_sample_rates:
 			return SAMPLE_RATE
 		rate = choose_sample_rate(requested, self._supported_sample_rates)
-		self._dll.eciSetParam(self._handle, ECI_SAMPLE_RATE, self._supported_sample_rates[rate])
+		for handle in self._all_handles():
+			self._dll.eciSetParam(handle, ECI_SAMPLE_RATE, self._supported_sample_rates[rate])
 		self._params[ECI_SAMPLE_RATE] = self._supported_sample_rates[rate]
 		return rate
+
+	def _all_handles(self) -> list:
+		"""Every live engine handle: ReLoq C's one per language, or just the one."""
+		handles = list(self._handles.values())
+		if self._handle and self._handle not in handles:
+			handles.append(self._handle)
+		return handles
 
 	def set_sample_rate(self, requested: int) -> int:
 		"""Change the output rate between utterances; return the effective one.
@@ -535,7 +683,7 @@ class EciEngine:
 		if samples == self._samples:
 			return rate
 		buffer = (c_short * samples)()
-		if self._dll.eciSetOutputBuffer(self._handle, samples, buffer):
+		if all(self._dll.eciSetOutputBuffer(handle, samples, buffer) for handle in self._all_handles()):
 			self._samples = samples
 			self._buffer = buffer
 		else:
@@ -585,6 +733,9 @@ class EciEngine:
 			f.write(updated_content)
 
 	def _load_dictionaries(self) -> None:
+		if self._config.reloq:
+			# Loaded per handle by _prepare_reloq_handle() instead.
+			return
 		language_code = (self._config.language_code or "enu").lower()
 		if not self._config.data_directory or not os.path.isdir(self._config.data_directory):
 			# No directory of .dic files to load.
@@ -621,6 +772,11 @@ class EciEngine:
 	# ------------------------------------------------------------------
 	# Public API invoked from the controller or the direct backend
 	def add_text(self, text: bytes) -> None:
+		if self._config.reloq:
+			# Already UTF-8: the Eloquence Text Builder encodes for ReLoq C that
+			# way (BuildOptions.utf8), since its eciAddText reads only cp1252.
+			self._dll.eciAddTextUtf8(self._handle, text, len(text), 0)
+			return
 		self._dll.eciAddText(self._handle, text)
 
 	def insert_index(self, index: int) -> None:
@@ -678,28 +834,68 @@ class EciEngine:
 			self._dictionary_handles.clear()
 			self._loaded_dictionary_languages.clear()
 			self._dictionary_handle = None
-			self._dll.eciDelete(self._handle)
+			for handle in self._all_handles():
+				self._dll.eciDelete(handle)
+			self._handles.clear()
 			self._handle = None
 
 	def set_param(self, param_id: int, value: int) -> None:
-		self._dll.eciSetParam(self._handle, param_id, value)
+		if self._config.reloq and param_id == ECI_LANGUAGE_PARAM:
+			self._switch_reloq_language(value)
+		else:
+			self._dll.eciSetParam(self._handle, param_id, value)
 		self._params[param_id] = value
 		# When changing voice (param 9), update all voice parameters
 		if param_id == ECI_LANGUAGE_PARAM:
 			self._config.language_code = LANG_BY_ID.get(value, "enu")
 			self._load_dictionaries()
 			for param in _VOICE_PARAMS:
-				self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
+				self._voice_params[param] = self._get_voice_param(param)
 
 	def set_voice_param(self, param_id: int, value: int, temporary: bool = False) -> None:
-		self._dll.eciSetVoiceParam(self._handle, 0, param_id, value)
+		if temporary and self._config.reloq and param_id == PITCH:
+			# A temporary pitch is a mark in the text, such as NVDA's raise for a
+			# capital letter and its reset after it, both queued before the
+			# utterance is synthesized.  ReLoq C reads its pitch parameter only
+			# when it synthesizes, so setting it twice collapsed to the reset:
+			# measured on 1.0.1, "A" between a raise to 95 and a reset to 65
+			# came out at 114.8 Hz, exactly as with no raise.  eciInsertPitch
+			# queues the change at its place in the text instead, and gives
+			# 235.0 Hz, as a base pitch of 95 does (237.3).  Its marks end with
+			# the utterance, which is what temporary means here.
+			self._dll.eciInsertPitch(self._handle, value)
+			return
+		self._set_voice_param(param_id, value)
 		if not temporary:
 			self._voice_params[param_id] = value
 
 	def copy_voice(self, variant: int) -> None:
-		self._dll.eciCopyVoice(self._handle, variant, 0)
+		if self._config.reloq:
+			preset = RELOQ_VOICE_PRESETS.get(variant)
+			if preset is None:
+				LOGGER.info("ReLoq C has no preset for variant %s", variant)
+				return
+			for param, value in zip(_RELOQ_PRESET_PARAMS, preset):
+				if param == RELOQ_GENDER:
+					self._gender = value
+					self._dll.eciSetParam(self._handle, RELOQ_GENDER, value)
+				else:
+					self._set_voice_param(param, value)
+		else:
+			self._dll.eciCopyVoice(self._handle, variant, 0)
 		for param in _VOICE_PARAMS:
-			self._voice_params[param] = self._dll.eciGetVoiceParam(self._handle, 0, param)
+			self._voice_params[param] = self._get_voice_param(param)
+
+	def _get_voice_param(self, param_id: int) -> int:
+		if self._config.reloq:
+			return self._dll.eciGetParam(self._handle, RELOQ_VOICE_PARAMS[param_id])
+		return self._dll.eciGetVoiceParam(self._handle, 0, param_id)
+
+	def _set_voice_param(self, param_id: int, value: int) -> None:
+		if self._config.reloq:
+			self._dll.eciSetParam(self._handle, RELOQ_VOICE_PARAMS[param_id], value)
+			return
+		self._dll.eciSetVoiceParam(self._handle, 0, param_id, value)
 
 	def get_state(self) -> Dict[str, object]:
 		return {
@@ -833,6 +1029,7 @@ class EciDispatcher:
 			rewrite_ini=payload.get("rewriteIni", True),
 			sample_rate=payload.get("sampleRate", SAMPLE_RATE),
 			wideband=payload.get("wideband", False),
+			reloq=payload.get("reloq", False),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.start()

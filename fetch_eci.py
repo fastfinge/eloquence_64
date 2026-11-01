@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download the engine binaries the build needs but source control excludes.
 
-Two engines, fetched for different reasons:
+Three engines, fetched for different reasons:
 
 * The proprietary Eloquence Engine (``ECI.DLL`` + the western ``.SYN`` voice
   data) is IBM proprietary, and comes from the same upstream release artifact
@@ -11,6 +11,12 @@ Two engines, fetched for different reasons:
   openevv's own NOTICE excludes its ``lang/enus`` data from that MIT grant, so
   this binary is treated like the proprietary files and kept out of source
   control too.
+* ReLoq C's 64-bit ``eci.dll`` (hozosch/Reloq-C) is an independent C engine
+  with an ECI-shaped interface, the second engine the Direct Backend can load.
+  It publishes no standalone DLL, so it is taken out of ReLoq C's own NVDA
+  add-on, along with the licence notices that add-on carries beside it.  The
+  repository states no licence of its own, so it is kept out of source control
+  as well.
 
 By default openevv is taken from its newest CI build on main, and published
 releases of this add-on take openevv's newest release instead
@@ -26,6 +32,11 @@ crashed the process.  v0.4 (5 October) carries it: it is main@7ee8c572 plus two
 commits, and measures the same as that build -- ten clean cancellation rounds,
 and identical audio with and without the add-on's dictionaries.
 
+ReLoq C follows the same policy (``--reloq-release``), with one difference:
+its CI only builds the NVDA add-on on its ``codex/release*`` branches, and keeps
+that artifact for 14 days, so a development build falls back to its newest
+release whenever no artifact is left or no token is available.
+
 Downloading a CI artifact needs a GitHub token, unlike a release asset; see
 _github_token().
 
@@ -35,6 +46,8 @@ Usage:
     python fetch_eci.py --openevv-only    # skip the proprietary files
     python fetch_eci.py --no-openevv      # skip openevv
     python fetch_eci.py --openevv-release # take the newest release, not CI
+    python fetch_eci.py --no-reloq        # skip ReLoq C
+    python fetch_eci.py --reloq-release   # take ReLoq C's newest release, not CI
 """
 
 import json
@@ -411,11 +424,161 @@ def fetch_openevv_ci():
 	_record_openevv_version(version)
 
 
+RELOQ_REPO = "hozosch/Reloq-C"
+RELOQ_DEST_DIR = os.path.join("addon", "synthDrivers", "reloq")
+RELOQ_VERSION_FILE = "reloq-version.txt"
+# ReLoq C ships no DLL on its own: both its release asset and its CI artifact
+# carry a complete NVDA add-on, and the engine is taken out of that.
+RELOQ_ASSET_SUFFIX = ".nvda-addon"
+RELOQ_DLL_MEMBER = "synthDrivers/reloqC/eci.dll"
+# Everything under this goes alongside the DLL: the notices for the OpenEVV code
+# ReLoq C vendors, and for the data it was built from.
+RELOQ_NOTICE_PREFIX = "doc/licenses/"
+RELOQ_CI_WORKFLOW = "packages.yml"
+RELOQ_CI_ARTIFACT = "nvda-addon"
+
+
+def reloq_present():
+	return os.path.exists(os.path.join(RELOQ_DEST_DIR, "eci.dll"))
+
+
+def installed_reloq_version():
+	try:
+		with open(os.path.join(RELOQ_DEST_DIR, RELOQ_VERSION_FILE), encoding="utf-8") as f:
+			return f.read().strip()
+	except OSError:
+		return None
+
+
+def _install_reloq_addon(addon_path, version):
+	"""Take the engine and its notices out of a ReLoq C .nvda-addon."""
+	os.makedirs(RELOQ_DEST_DIR, exist_ok=True)
+	with zipfile.ZipFile(addon_path, "r") as zf:
+		members = {name.lower(): name for name in zf.namelist()}
+		dll_member = members.get(RELOQ_DLL_MEMBER.lower())
+		if dll_member is None:
+			raise SystemExit(
+				f"ERROR: ReLoq C {version} does not contain {RELOQ_DLL_MEMBER}.\n"
+				"       The add-on layout changed; fetch_eci.py needs updating."
+			)
+		dest_dll = _extract(zf, dll_member, RELOQ_DEST_DIR, "eci.dll")
+		for name in zf.namelist():
+			if name.startswith(RELOQ_NOTICE_PREFIX) and not name.endswith("/"):
+				_extract(zf, name, RELOQ_DEST_DIR)
+	if not _is_pe32_plus(dest_dll):
+		raise SystemExit(
+			f"ERROR: the eci.dll from ReLoq C {version} is not a 64-bit PE image.\n"
+			"       64-bit NVDA cannot load it; the layout may have changed."
+		)
+	with open(os.path.join(RELOQ_DEST_DIR, RELOQ_VERSION_FILE), "w", encoding="utf-8") as f:
+		f.write(version + "\n")
+	print(f"Done. ReLoq C {version} installed in {RELOQ_DEST_DIR}.")
+
+
+def fetch_reloq_release():
+	"""Install the engine from ReLoq C's newest release."""
+	print(f"Resolving the newest ReLoq C release from {RELOQ_REPO}...")
+	release = _github_json(f"https://api.github.com/repos/{RELOQ_REPO}/releases/latest")
+	tag = release.get("tag_name") or "unknown"
+	asset = next(
+		(a for a in release.get("assets", ()) if a.get("name", "").endswith(RELOQ_ASSET_SUFFIX)),
+		None,
+	)
+	if asset is None:
+		names = ", ".join(a.get("name", "?") for a in release.get("assets", ())) or "none"
+		raise SystemExit(
+			f"ERROR: ReLoq C release {tag} has no *{RELOQ_ASSET_SUFFIX} asset.\n"
+			f"       Assets: {names}"
+		)
+	print(f"Downloading ReLoq C {tag}:\n  {asset['browser_download_url']}")
+	tmpfd, tmppath = tempfile.mkstemp(suffix=RELOQ_ASSET_SUFFIX)
+	os.close(tmpfd)
+	try:
+		_download(asset["browser_download_url"], tmppath)
+		_install_reloq_addon(tmppath, tag)
+	finally:
+		os.unlink(tmppath)
+
+
+def _newest_reloq_ci_artifact(token):
+	"""The newest successful packaging run whose add-on artifact has not expired.
+
+	Any branch: ReLoq C only runs this workflow on its release branches, so
+	restricting it to main as openevv's is would find nothing.
+	"""
+	runs = _github_json(
+		f"https://api.github.com/repos/{RELOQ_REPO}/actions/workflows/{RELOQ_CI_WORKFLOW}"
+		"/runs?status=success&per_page=30"
+	).get("workflow_runs", ())
+	runs.sort(key=lambda r: (r.get("run_number") or 0, r.get("created_at") or ""), reverse=True)
+	for run in runs:
+		artifacts = _github_json(
+			f"https://api.github.com/repos/{RELOQ_REPO}/actions/runs/{run['id']}/artifacts"
+		).get("artifacts", ())
+		artifact = next((a for a in artifacts if a.get("name") == RELOQ_CI_ARTIFACT), None)
+		if artifact is not None and not artifact.get("expired"):
+			return run, artifact
+	return None, None
+
+
+def fetch_reloq_ci():
+	"""Install the engine from ReLoq C's newest CI build, or its newest release.
+
+	The default outside published releases.  Falls back to the release rather
+	than failing, because ReLoq C's artifacts are short lived and only built on
+	its release branches, so having none is the normal case between releases.
+	"""
+	token = _github_token()
+	if token is None:
+		print("No GitHub token for a ReLoq C CI artifact; taking its newest release.")
+		fetch_reloq_release()
+		return
+	print(f"Resolving the newest successful {RELOQ_CI_WORKFLOW} run on {RELOQ_REPO}...")
+	run, artifact = _newest_reloq_ci_artifact(token)
+	if artifact is None:
+		print("No ReLoq C CI artifact is still downloadable; taking its newest release.")
+		fetch_reloq_release()
+		return
+	head_sha = run.get("head_sha") or "unknown"
+	version = f"{run.get('head_branch') or '?'}@{head_sha[:8]} (build run {run['id']})"
+	print(f"Downloading ReLoq C {version}:\n  {artifact['archive_download_url']}")
+	tmpdir = tempfile.mkdtemp()
+	try:
+		artifact_zip = os.path.join(tmpdir, "artifact.zip")
+		try:
+			_download(
+				artifact["archive_download_url"],
+				artifact_zip,
+				token=token,
+				accept="application/vnd.github+json",
+			)
+		except urllib.error.HTTPError as error:
+			if error.code not in (401, 403, 404):
+				raise
+			print(f"GitHub refused the ReLoq C artifact ({error.code}); taking its newest release.")
+			fetch_reloq_release()
+			return
+		# The artifact is a zip holding the .nvda-addon, itself a zip.
+		with zipfile.ZipFile(artifact_zip, "r") as zf:
+			addon = next((n for n in zf.namelist() if n.endswith(RELOQ_ASSET_SUFFIX)), None)
+			if addon is None:
+				raise SystemExit(
+					f"ERROR: ReLoq C build run {run['id']} carries no *{RELOQ_ASSET_SUFFIX}.\n"
+					"       The artifact layout changed; fetch_eci.py needs updating."
+				)
+			addon_path = _extract(zf, addon, tmpdir, "reloq.nvda-addon")
+		_install_reloq_addon(addon_path, version)
+	finally:
+		shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main():
 	force = "--force" in sys.argv
 	want_proprietary = "--openevv-only" not in sys.argv
 	want_openevv = "--no-openevv" not in sys.argv
 	from_release = "--openevv-release" in sys.argv
+	want_reloq = "--no-reloq" not in sys.argv
+	reloq_from_release = "--reloq-release" in sys.argv
 
 	if want_proprietary:
 		if not force and files_present():
@@ -431,6 +594,15 @@ def main():
 			fetch_openevv_release()
 		else:
 			fetch_openevv_ci()
+
+	if want_reloq:
+		if not force and reloq_present():
+			version = installed_reloq_version() or "unknown version"
+			print(f"ReLoq C already present ({version}). Use --force to re-download.")
+		elif reloq_from_release:
+			fetch_reloq_release()
+		else:
+			fetch_reloq_ci()
 
 
 if __name__ == "__main__":

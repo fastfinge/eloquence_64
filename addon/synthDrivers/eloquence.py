@@ -128,30 +128,40 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
 			# Engine selection.  Changing this takes effect when the synthesizer is
 			# next loaded, because an engine is chosen while opening it.
-			self.openevvCheckbox = sHelper.addItem(
-				wx.CheckBox(
+			# Only engines actually present in this add-on are offered, so the list
+			# always starts with the helper and grows with what the build carries.
+			self.directEngines = [None] + [
+				engine for engine in _eloquence.DIRECT_ENGINE_NAMES if _eloquence.direct_engine_available(engine)
+			]
+			engine_labels = [
+				# Translators: Choice in the Eloquence settings for using only the 32-bit helper.
+				_("None (32-bit helper only)"),
+			]
+			for engine in self.directEngines[1:]:
+				version = _eloquence.direct_engine_version(engine) or _("unknown version")
+				engine_labels.append(f"{_eloquence.DIRECT_ENGINE_NAMES[engine]} {version}")
+			self.directEngineChoice = sHelper.addLabeledControl(
+				# Translators: Label of a combobox in the Eloquence category of the settings dialog
+				_("64-bit engine:"),
+				wx.Choice,
+				choices=engine_labels,
+			)
+			selected = _eloquence.selected_direct_engine()
+			self.directEngineChoice.SetSelection(
+				self.directEngines.index(selected) if selected in self.directEngines else 0
+			)
+			sHelper.addItem(
+				wx.StaticText(
 					self,
-					# Translators: Label of a checkbox in the Eloquence category of the settings dialog
-					label=_("Use the 64-bit openevv engine where it supports the language"),
+					label=_(
+						# Translators: Explains the 64-bit engine option.
+						"A 64-bit engine runs inside NVDA, with no helper process. openevv "
+						"currently supports English only; ReLoq C supports every language. "
+						"Any language the chosen engine lacks falls back to the 32-bit helper "
+						"automatically. Takes effect when the synthesizer is next loaded."
+					),
 				)
 			)
-			self.openevvCheckbox.SetValue(bool(_eloquence.openevv_enabled()))
-			openevv_version = _eloquence.openevv_version()
-			if not _eloquence.openevv_available():
-				self.openevvCheckbox.Disable()
-				# Translators: Shown when the openevv engine is missing from the add-on.
-				openevv_status = _("The openevv engine is not present in this add-on.")
-			else:
-				openevv_status = _(
-					# Translators: Explains the openevv engine option. {version} is a release
-					# tag such as v0.3.
-					"openevv {version} runs inside NVDA, with no helper process. "
-					"It currently supports English only; other languages fall back to "
-					"the 32-bit helper automatically. Pronunciation dictionaries are "
-					"not supported by openevv and apply only to the helper. "
-					"Takes effect when the synthesizer is next loaded."
-				).format(version=openevv_version or _("unknown version"))
-			sHelper.addItem(wx.StaticText(self, label=openevv_status))
 
 			self.dictionarySources = {
 				"https://github.com/mohamed00/AltIBMTTSDictionaries": "Alternative IBM TTS Dictionaries",
@@ -403,8 +413,8 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 	def onSave(self):
 		if "eloquence" not in config.conf:
 			config.conf["eloquence"] = {}
-		if self.openevvCheckbox.IsEnabled():
-			config.conf["eloquence"]["use_openevv"] = self.openevvCheckbox.GetValue()
+		engine = self.directEngines[self.directEngineChoice.GetSelection()]
+		config.conf["eloquence"]["direct_engine"] = engine or "none"
 		selection = self.dictionaryChoice.GetStringSelection()
 		for url, name in self.dictionarySources.items():
 			if name == selection:
@@ -693,11 +703,14 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		pending_indexes = []
 		queued_speech = False
 		options = self._build_options()
-		# The openevv bracket workaround is per fragment, because a mixed-language
-		# utterance can cross backends mid-sentence and the proprietary engine must
-		# not get the rewrite.  Both variants are built once here rather than per
-		# fragment.
-		direct_options = dataclasses.replace(options, openevv_bracket_fixes=True)
+		# What an in-process engine needs from the Text Builder is per fragment,
+		# because a mixed-language utterance can cross backends mid-sentence and
+		# neither the openevv bracket workaround nor ReLoq C's UTF-8 and missing
+		# `vv may reach any other engine.  Every variant is built once here rather than per fragment.
+		engine_options = {
+			_eloquence.OPENEVV: dataclasses.replace(options, openevv_bracket_fixes=True),
+			_eloquence.RELOQ: dataclasses.replace(options, utf8=True, inline_volume=False),
+		}
 		sequence_voice = getattr(self, "_defaultVoice", str(_eloquence.params.get(9, 65536)))
 		last_queued_engine_voice = getattr(self, "_lastEngineVoice", None)
 
@@ -719,10 +732,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		for item in speechSequence:
 			if isinstance(item, str):
 				s = str(item)
-				fragment_options = (
-					direct_options
-					if _eloquence.voice_uses_direct_backend(sequence_voice)
-					else options
+				fragment_options = engine_options.get(
+					_eloquence.direct_engine_for_voice(sequence_voice), options
 				)
 				s = _eloquence_text.build(s, voice_id=sequence_voice, options=fragment_options)
 				outlist.append((_eloquence.speak, (s,)))
