@@ -15,6 +15,8 @@ the real DLL, so a regression upstream shows up here rather than in NVDA:
   capital-letter pitch raise is heard, and an inline `vv opening a later
   fragment adds no pause.
 * Volume works across its whole range in every language, not only German.
+* With dictionaries loaded, eciSetDict and a language change are instant
+  (#17), not 100+ ms each.
 
 They need the fetched engine and 64-bit Python, and skip otherwise.
 """
@@ -23,6 +25,7 @@ import array
 import os
 import statistics
 import struct
+import time
 import unittest
 from pathlib import Path
 
@@ -241,7 +244,7 @@ class RealEngineTests(unittest.TestCase):
 	@unittest.skipUnless((_INSTALLED_DATA / "ENUmain.dic").exists(), "needs the add-on's dictionaries")
 	def test_dictionaries_survive_reselecting_and_returning_to_a_language(self):
 		# EciEngine skips eciSetDict when eciGetDict already reports the set,
-		# because ReLoq C rebuilds its tables on every call.  That relies on
+		# because ReLoq C 1.1.1 rebuilt its tables on every call.  That relies on
 		# the engine keeping each language's set, which this checks by ear.
 		self.engine = self._start(str(_INSTALLED_DATA))
 		loaded, _ = self._speak(b"Hermione.")
@@ -250,6 +253,35 @@ class RealEngineTests(unittest.TestCase):
 		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
 		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
 		self.assertEqual(self._speak(b"Hermione.")[0], loaded)
+
+	@unittest.skipUnless(
+		(_INSTALLED_DATA / "ENUmain.dic").exists() and (_INSTALLED_DATA / "DEUmain.dic").exists(),
+		"needs the add-on's ENU and DEU dictionaries",
+	)
+	def test_dictionaries_do_not_slow_a_language_change(self):
+		# 1.1.1 rebuilt the dictionary tables on every eciSetDict and every
+		# language change, 90-140 ms each, in front of the next utterance
+		# (hozosch/Reloq-C#17).  1.1.2 measures 0.0 ms for both.
+		self.engine = self._start(str(_INSTALLED_DATA))
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
+		dll, handle = self.engine._dll, self.engine._handle
+		active = dll.eciGetDict(handle)
+
+		def median_ms(call):
+			times = []
+			for _ in range(5):
+				start = time.perf_counter()
+				call()
+				times.append(1000 * (time.perf_counter() - start))
+			return statistics.median(times)
+
+		self.assertLess(median_ms(lambda: dll.eciSetDict(handle, active)), 20)
+		switch = lambda: (
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU),
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU),
+		)
+		self.assertLess(median_ms(switch), 20)
 
 
 if __name__ == "__main__":

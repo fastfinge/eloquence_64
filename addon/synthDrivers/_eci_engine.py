@@ -629,12 +629,12 @@ class EciEngine:
 	def _activate_dictionary(self) -> None:
 		"""Make this language's dictionary set active, unless it already is.
 
-		Asking first matters because eciSetDict is not cheap everywhere: ReLoq C
-		1.1.1 rebuilds its tables on every call, 100-120 ms even for the set it
-		already has.  set_param(9) lands here on every utterance after a
-		cancellation -- the Synth Driver side forgets the engine voice on
-		cancel() -- so calling it unconditionally put that delay in front of
-		almost every response.
+		Asking first is cheap insurance: ReLoq C 1.1.1 rebuilt its tables on
+		every eciSetDict, 100-120 ms even for the set it already had
+		(hozosch/Reloq-C#17, fixed in 1.1.2, where it measures 0.0 ms).
+		set_param(9) lands here on every utterance after a cancellation -- the
+		Synth Driver side forgets the engine voice on cancel() -- so calling it
+		unconditionally put any such cost in front of almost every response.
 
 		Every engine here re-selects a language's set by itself once it has been
 		set for that language: measured on the proprietary engine and ReLoq C

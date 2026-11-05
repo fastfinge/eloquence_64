@@ -206,8 +206,9 @@ class DictionaryLoadingTests(unittest.TestCase):
 		return [call for call in runtime._dll.calls if call[0] == "setDict"]
 
 	def test_reselecting_the_same_language_does_not_set_its_dictionary_again(self):
-		# eciSetDict costs 100-120 ms on ReLoq C 1.1.1 even for the set already
-		# active, and set_param(9) arrives after every cancellation.
+		# eciSetDict cost 100-120 ms on ReLoq C 1.1.1 even for the set already
+		# active (hozosch/Reloq-C#17, fixed in 1.1.2), and set_param(9) arrives
+		# after every cancellation.
 		with tempfile.TemporaryDirectory() as data_directory:
 			open(os.path.join(data_directory, "enumain.dic"), "w").close()
 			runtime = make_runtime(data_directory, "enu")

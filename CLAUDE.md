@@ -89,6 +89,7 @@ The Eloquence Host Process is started lazily, so a user who only speaks a langua
 - An inline `` `vv ``/`` `vs `` opening a later fragment adds no pause (#5): `Alt+` then `` `vv100 a `` measures identical to `Alt+` then `a`.
 - Volume works across its whole range in every language (#2), not only 80-100.
 - `eciNewDict`/`eciLoadDict` load the `ENUmain`/`ENURoot`/`ENUabbr` files with 0, and the audio is identical to its own `eciSetDictionaryPath`.
+- With dictionaries loaded, `eciSetDict` and a language change are instant from 1.1.2 (hozosch/Reloq-C#17). 1.1.1 rebuilt the tables on every call, 90-140 ms each in front of the next utterance. `_activate_dictionary()` still asks `eciGetDict` before setting, which costs nothing.
 
 What remains different is harmless: it refuses parameters 41/42 with `-1` (the inline `` `da ``/`` `pp `` carry them), it has no wideband (so `_direct_initialize_payload()` sends it no `wideband`), and it has none of openevv's bracket-naming bug, so neither bracket rewrite is applied. All seven sample rates are accepted on a live handle.
 
