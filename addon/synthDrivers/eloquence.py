@@ -705,11 +705,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		options = self._build_options()
 		# What an in-process engine needs from the Text Builder is per fragment,
 		# because a mixed-language utterance can cross backends mid-sentence and
-		# neither the openevv bracket workaround nor ReLoq C's UTF-8 and missing
-		# `vv may reach any other engine.  Every variant is built once here rather than per fragment.
+		# the openevv bracket workaround may not reach any other engine.  Every
+		# variant is built once here rather than per fragment.
 		engine_options = {
 			_eloquence.OPENEVV: dataclasses.replace(options, openevv_bracket_fixes=True),
-			_eloquence.RELOQ: dataclasses.replace(options, utf8=True, inline_volume=False),
 		}
 		sequence_voice = getattr(self, "_defaultVoice", str(_eloquence.params.get(9, 65536)))
 		last_queued_engine_voice = getattr(self, "_lastEngineVoice", None)

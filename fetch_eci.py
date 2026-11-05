@@ -14,9 +14,10 @@ Three engines, fetched for different reasons:
 * ReLoq C's 64-bit ``eci.dll`` (hozosch/Reloq-C) is an independent C engine
   with an ECI-shaped interface, the second engine the Direct Backend can load.
   It publishes no standalone DLL, so it is taken out of ReLoq C's own NVDA
-  add-on, along with the licence notices that add-on carries beside it.  The
-  repository states no licence of its own, so it is kept out of source control
-  as well.
+  add-on, along with the licence notices that add-on carries beside it.  It is
+  GPL-3.0-or-later from 1.1, but as a fetched build output it is kept out of
+  source control like openevv's.  The add-on needs 1.1 or later, so a checkout
+  still holding a 1.0.x engine has to be refetched with --force.
 
 By default openevv is taken from its newest CI build on main, and published
 releases of this add-on take openevv's newest release instead
