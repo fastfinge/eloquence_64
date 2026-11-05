@@ -448,6 +448,129 @@ class DirectCancellationTests(unittest.TestCase):
 		self.assertEqual(self.stopped, [])
 
 
+class _HeldConnection:
+	"""A Host Channel whose host never answers until told to."""
+
+	def __init__(self):
+		self.sent = []
+
+	def send(self, message):
+		self.sent.append(message)
+
+
+class HostCancellationTests(unittest.TestCase):
+	"""stop() must reach the host without waiting for an in-flight command."""
+
+	def setUp(self):
+		self.module = _load_client_module()
+		self.pipeline = self.module.AudioPipeline()
+		self.client = self.module.EloquenceHostClient(self.pipeline)
+		self.connection = _HeldConnection()
+		self.client._host = types.SimpleNamespace(connection=self.connection)
+
+	def _answer(self, msg_id):
+		# What the receiver loop does with a response.
+		event = self.client._pending.pop(msg_id)
+		self.client._responses[msg_id] = {"type": "response", "id": msg_id, "payload": {"ok": True}}
+		event.set()
+
+	def test_stop_is_sent_while_a_synthesize_is_still_waiting(self):
+		# The worker waits on synthesize() for as long as the host synthesizes;
+		# stop() runs on NVDA's thread, which must not wait with it.
+		import threading
+		import time
+
+		result = {}
+		worker = threading.Thread(
+			target=lambda: result.update(self.client.send_command("synthesize")), daemon=True
+		)
+		worker.start()
+		deadline = time.monotonic() + 2
+		while not self.client._pending and time.monotonic() < deadline:
+			time.sleep(0.001)
+		synthesize_id = next(iter(self.client._pending))
+
+		started = time.monotonic()
+		self.client.stop()
+		self.assertLess(time.monotonic() - started, 0.5)
+		self.assertEqual([m["command"] for m in self.connection.sent], ["synthesize", "stop"])
+
+		self._answer(synthesize_id)
+		worker.join(timeout=2)
+		self.assertEqual(result, {"ok": True})
+
+	def _attach_board(self):
+		import uuid
+
+		self.client._cancel_board = self.module._engine.CancelBoard(
+			f"Local\\eloquence-cancel-test-{uuid.uuid4().hex}"
+		)
+		self.addCleanup(self.client._cancel_board.close)
+		return self.client._cancel_board
+
+	def test_stop_publishes_the_new_generation_on_the_board(self):
+		board = self._attach_board()
+		self.client.stop()
+		self.assertEqual(board.latest(), self.pipeline.sequence)
+		self.assertTrue(board.is_stale(self.pipeline.sequence - 1))
+
+	def test_synthesize_carries_its_generation_only_to_a_host_that_attached_the_board(self):
+		self._attach_board()
+		self.pipeline.current_seq = 4
+		self.client.send_command("synthesize", wait=False)
+		self.client._host_aborts = True
+		self.client.send_command("synthesize", wait=False)
+		self.assertEqual([m["payload"] for m in self.connection.sent], [{}, {"generation": 4}])
+
+	def test_initialize_names_the_board_and_learns_whether_the_host_took_it(self):
+		import threading
+
+		board = self._attach_board()
+		for host_reply, expected in (({"cancelBoard": True}, True), ({}, False)):
+			with self.subTest(host_reply=host_reply):
+				self.connection.sent.clear()
+				result = {}
+				worker = threading.Thread(
+					target=lambda: result.update(self.client.send_command("initialize")), daemon=True
+				)
+				worker.start()
+				while not self.client._pending:
+					pass
+				msg_id = next(iter(self.client._pending))
+				self.assertEqual(self.connection.sent[0]["payload"], {"cancelBoard": board.name})
+				event = self.client._pending.pop(msg_id)
+				self.client._responses[msg_id] = {"payload": host_reply}
+				event.set()
+				worker.join(timeout=2)
+				self.assertIs(self.client._host_aborts, expected)
+
+	def test_concurrent_waiting_commands_each_get_their_own_response(self):
+		import threading
+		import time
+
+		results = {}
+
+		def send(name):
+			results[name] = self.client.send_command(name)
+
+		threads = [threading.Thread(target=send, args=(name,), daemon=True) for name in ("a", "b")]
+		for thread in threads:
+			thread.start()
+		deadline = time.monotonic() + 2
+		while len(self.client._pending) < 2 and time.monotonic() < deadline:
+			time.sleep(0.001)
+		# Both are waiting at once, which the lock used to forbid.
+		self.assertEqual(len(self.client._pending), 2)
+		ids = {m["command"]: m["id"] for m in self.connection.sent}
+		for name in ("b", "a"):
+			event = self.client._pending.pop(ids[name])
+			self.client._responses[ids[name]] = {"payload": {"for": name}}
+			event.set()
+		for thread in threads:
+			thread.join(timeout=2)
+		self.assertEqual(results, {"a": {"for": "a"}, "b": {"for": "b"}})
+
+
 class AudioPipelineSingletonTests(unittest.TestCase):
 	def test_both_client_types_accept_the_shared_pipeline(self):
 		module = _load_client_module()

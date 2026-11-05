@@ -10,6 +10,7 @@ import queue
 import shlex
 import subprocess
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -558,6 +559,12 @@ class EloquenceHostClient(EngineClient):
 		self._receiver: Optional[threading.Thread] = None
 		self._id_counter = itertools.count(1)
 		self._command_lock = threading.Lock()
+		# Shared with every host this client starts; see _engine.CancelBoard.
+		# _host_aborts is whether the running host attached it, which an older
+		# host does not, and is what decides whether synthesize carries a
+		# Speech Generation for the host to compare against.
+		self._cancel_board: Optional[_engine.CancelBoard] = None
+		self._host_aborts = False
 
 	@property
 	def started(self) -> bool:
@@ -567,6 +574,15 @@ class EloquenceHostClient(EngineClient):
 	def ensure_started(self) -> None:
 		if self._host:
 			return
+		self._host_aborts = False
+		if self._cancel_board is None:
+			try:
+				self._cancel_board = _engine.CancelBoard(
+					f"Local\\eloquence-cancel-{os.getpid()}-{uuid.uuid4().hex}"
+				)
+				self._cancel_board.publish(self.pipeline.sequence)
+			except Exception:
+				LOGGER.exception("Could not create the Cancel Board; cancelling at utterance end")
 		addon_dir = os.path.abspath(os.path.dirname(__file__))
 		listener = _ipc.create_listener()
 		cmd = list(self._resolve_host_executable(addon_dir))
@@ -693,6 +709,10 @@ class EloquenceHostClient(EngineClient):
 		if not self._host:
 			return
 		self.pipeline.cancel()
+		# Before the stop command, which the host cannot read until it has left
+		# eciSynchronize: the board is what lets it leave early.
+		if self._cancel_board is not None:
+			self._cancel_board.publish(self.pipeline.sequence)
 		# Tell the host to stop without blocking
 		try:
 			self.send_command("stop", wait=False)
@@ -703,6 +723,19 @@ class EloquenceHostClient(EngineClient):
 	def send_command(self, command: str, wait: bool = True, **payload: Any) -> Dict[str, Any]:
 		if not self._host:
 			raise RuntimeError("Host not started")
+		if command == "initialize" and self._cancel_board is not None:
+			payload["cancelBoard"] = self._cancel_board.name
+		elif command == "synthesize" and self._host_aborts:
+			# The generation the synthesis worker is running this utterance as.
+			payload["generation"] = self.pipeline.current_seq
+		# The lock covers only numbering, registering and sending, so two threads
+		# cannot interleave writes on the Host Channel.  It is deliberately not
+		# held while waiting for the response: it used to be, and stop() on NVDA's
+		# thread then waited out whatever synthesize() the worker had in flight --
+		# measured against the real host, 30 ms behind a paragraph and up to
+		# 610 ms behind a 1400-character block, with NVDA frozen throughout.
+		# Responses are matched by id, and the host serves the Host Channel single
+		# threaded, so commands still run in the order they were sent.
 		with self._command_lock:
 			msg_id = next(self._id_counter)
 			event = threading.Event() if wait else None
@@ -727,19 +760,22 @@ class EloquenceHostClient(EngineClient):
 					self._pending.pop(msg_id, None)
 				raise
 
-			# If we are not going to wait for the response (e.g. stop command), return blank immediately
-			if not wait:
-				return {}
+		# If we are not going to wait for the response (e.g. stop command), return blank immediately
+		if not wait:
+			return {}
 
-			# Wait for response with timeout to avoid infinite blocking
-			if not event.wait(timeout=5.0):
-				self._pending.pop(msg_id, None)
-				LOGGER.error("Command %s timed out after 5 seconds", command)
-				raise RuntimeError(f"Command {command} timed out")
-			response = self._responses.pop(msg_id, {"error": "no response received"})
-			if "error" in response:
-				raise RuntimeError(response["error"])
-			return response.get("payload", {})
+		# Wait for response with timeout to avoid infinite blocking
+		if not event.wait(timeout=5.0):
+			self._pending.pop(msg_id, None)
+			LOGGER.error("Command %s timed out after 5 seconds", command)
+			raise RuntimeError(f"Command {command} timed out")
+		response = self._responses.pop(msg_id, {"error": "no response received"})
+		if "error" in response:
+			raise RuntimeError(response["error"])
+		result = response.get("payload", {})
+		if command == "initialize":
+			self._host_aborts = bool(isinstance(result, dict) and result.get("cancelBoard"))
+		return result
 
 	# ------------------------------------------------------------------
 	def shutdown(self) -> None:
