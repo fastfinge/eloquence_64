@@ -277,10 +277,10 @@ class RealEngineTests(unittest.TestCase):
 			return statistics.median(times)
 
 		self.assertLess(median_ms(lambda: dll.eciSetDict(handle, active)), 20)
-		switch = lambda: (
-			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU),
-			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU),
-		)
+		def switch():
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
+
 		self.assertLess(median_ms(switch), 20)
 
 
