@@ -7,9 +7,18 @@ from addon.synthDrivers import _eci_engine as engine
 
 
 class FakeDll:
+	"""Records calls, and keeps an active dictionary set per language.
+
+	Measured on the proprietary engine and ReLoq C 1.1.1 alike: once a set has
+	been made active for a language, the engine re-selects it whenever that
+	language is selected again, and eciGetDict reports it.
+	"""
+
 	def __init__(self):
 		self.calls = []
 		self._next_dictionary = 1
+		self._language = None
+		self._active = {}
 
 	def eciNewDict(self, handle):
 		dictionary_handle = f"dict-{self._next_dictionary}"
@@ -19,6 +28,10 @@ class FakeDll:
 
 	def eciSetDict(self, handle, dictionary_handle):
 		self.calls.append(("setDict", handle, dictionary_handle))
+		self._active[self._language] = dictionary_handle
+
+	def eciGetDict(self, handle):
+		return self._active.get(self._language)
 
 	def eciLoadDict(self, handle, dictionary_handle, index, path):
 		self.calls.append(
@@ -27,6 +40,8 @@ class FakeDll:
 
 	def eciSetParam(self, handle, param_id, value):
 		self.calls.append(("setParam", handle, param_id, value))
+		if param_id == engine.ECI_LANGUAGE_PARAM:
+			self._language = value
 
 	def eciInsertIndex(self, handle, index):
 		self.calls.append(("insertIndex", handle, index))
@@ -186,6 +201,50 @@ class DictionaryLoadingTests(unittest.TestCase):
 			runtime._dll.calls.index(("setParam", "eci", 9, engine.LANGS["esp"])),
 			runtime._dll.calls.index(("newDict", "eci", "dict-2")),
 		)
+
+	def _set_dict_calls(self, runtime):
+		return [call for call in runtime._dll.calls if call[0] == "setDict"]
+
+	def test_reselecting_the_same_language_does_not_set_its_dictionary_again(self):
+		# eciSetDict costs 100-120 ms on ReLoq C 1.1.1 even for the set already
+		# active, and set_param(9) arrives after every cancellation.
+		with tempfile.TemporaryDirectory() as data_directory:
+			open(os.path.join(data_directory, "enumain.dic"), "w").close()
+			runtime = make_runtime(data_directory, "enu")
+			runtime.set_param(9, engine.LANGS["enu"])
+			runtime.set_param(9, engine.LANGS["enu"])
+			runtime.set_param(9, engine.LANGS["enu"])
+
+		self.assertEqual(self._set_dict_calls(runtime), [("setDict", "eci", "dict-1")])
+
+	def test_returning_to_a_language_relies_on_the_engine_reselecting_its_set(self):
+		with tempfile.TemporaryDirectory() as data_directory:
+			for name in ("enumain.dic", "espmain.dic"):
+				open(os.path.join(data_directory, name), "w").close()
+			runtime = make_runtime(data_directory, "enu")
+			for language in ("enu", "esp", "enu", "esp"):
+				runtime.set_param(9, engine.LANGS[language])
+
+		self.assertEqual(
+			self._set_dict_calls(runtime),
+			[("setDict", "eci", "dict-1"), ("setDict", "eci", "dict-2")],
+		)
+
+	def test_an_engine_without_eci_get_dict_still_gets_its_set(self):
+		class NoGetDict(FakeDll):
+			def __getattribute__(self, name):
+				if name == "eciGetDict":
+					raise AttributeError(name)
+				return super().__getattribute__(name)
+
+		with tempfile.TemporaryDirectory() as data_directory:
+			open(os.path.join(data_directory, "enumain.dic"), "w").close()
+			runtime = make_runtime(data_directory, "enu")
+			runtime._dll = NoGetDict()
+			runtime.set_param(9, engine.LANGS["enu"])
+			runtime.set_param(9, engine.LANGS["enu"])
+
+		self.assertEqual(len(self._set_dict_calls(runtime)), 2)
 
 
 if __name__ == "__main__":

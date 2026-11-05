@@ -238,6 +238,19 @@ class RealEngineTests(unittest.TestCase):
 		with_dictionaries, _ = self._speak(b"Hermione.")
 		self.assertNotEqual(len(with_dictionaries), len(without))
 
+	@unittest.skipUnless((_INSTALLED_DATA / "ENUmain.dic").exists(), "needs the add-on's dictionaries")
+	def test_dictionaries_survive_reselecting_and_returning_to_a_language(self):
+		# EciEngine skips eciSetDict when eciGetDict already reports the set,
+		# because ReLoq C rebuilds its tables on every call.  That relies on
+		# the engine keeping each language's set, which this checks by ear.
+		self.engine = self._start(str(_INSTALLED_DATA))
+		loaded, _ = self._speak(b"Hermione.")
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
+		self.assertEqual(self._speak(b"Hermione.")[0], loaded)
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
+		self.assertEqual(self._speak(b"Hermione.")[0], loaded)
+
 
 if __name__ == "__main__":
 	unittest.main()

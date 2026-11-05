@@ -73,6 +73,7 @@ ECI_SIGNATURES = {
 	# treatment as the engine handle.
 	"eciNewDict": ([c_void_p], c_void_p),
 	"eciSetDict": ([c_void_p, c_void_p], c_int),
+	"eciGetDict": ([c_void_p], c_void_p),
 	"eciLoadDict": ([c_void_p, c_void_p, c_int, c_char_p], c_int),
 	"eciDeleteDict": ([c_void_p, c_void_p], c_int),
 	# Queried by available_languages() on a freshly loaded library, before any
@@ -137,6 +138,7 @@ def choose_sample_rate(requested: int, supported) -> int:
 		return requested
 	lower = [rate for rate in supported if rate < requested]
 	return max(lower) if lower else min(supported)
+
 
 # A sentinel index value used by Eloquence to mark the end of a chunk.
 FINAL_INDEX = 0xFFFF
@@ -544,8 +546,7 @@ class EciEngine:
 			# Loud, because the openevv case that refused also dropped the rate
 			# change itself, which plays at the wrong speed.
 			LOGGER.warning(
-				"Eloquence engine refused a new output buffer at %d Hz; keeping its "
-				"%d-sample one",
+				"Eloquence engine refused a new output buffer at %d Hz; keeping its %d-sample one",
 				rate,
 				self._samples,
 			)
@@ -618,7 +619,31 @@ class EciEngine:
 						)
 						break
 			self._loaded_dictionary_languages.add(language_code)
-		self._dll.eciSetDict(self._handle, self._dictionary_handle)
+		self._activate_dictionary()
+
+	def _activate_dictionary(self) -> None:
+		"""Make this language's dictionary set active, unless it already is.
+
+		Asking first matters because eciSetDict is not cheap everywhere: ReLoq C
+		1.1.1 rebuilds its tables on every call, 100-120 ms even for the set it
+		already has.  set_param(9) lands here on every utterance after a
+		cancellation -- the Synth Driver side forgets the engine voice on
+		cancel() -- so calling it unconditionally put that delay in front of
+		almost every response.
+
+		Every engine here re-selects a language's set by itself once it has been
+		set for that language: measured on the proprietary engine and ReLoq C
+		1.1.1 alike, eciGetDict reports the set after a same-language
+		eciSetParam(9), and after switching away and back, while a language never
+		given one reports none.  So skipping is a no-op on any engine that
+		already had it, and still sets it the first time.
+		"""
+		try:
+			active = self._dll.eciGetDict(self._handle)
+		except AttributeError:
+			active = None
+		if active != self._dictionary_handle:
+			self._dll.eciSetDict(self._handle, self._dictionary_handle)
 
 	# ------------------------------------------------------------------
 	# Public API invoked from the controller or the direct backend
