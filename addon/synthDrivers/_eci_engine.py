@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import mmap
 import os
+import struct
 from ctypes import (
 	POINTER,
 	c_char_p,
@@ -388,6 +390,9 @@ class EciEngine:
 		self._saw_final_index = False
 		self._pending_indexes: list = []
 		self._send_disabled = False
+		# Set only by the Eloquence Host Process; see CancelBoard.  Asked by
+		# synthesize() whether its utterance has already been cancelled.
+		self.abort_check: Optional[Callable[[int], bool]] = None
 
 	# ------------------------------------------------------------------
 	# Event reporting
@@ -655,7 +660,26 @@ class EciEngine:
 		if index != FINAL_INDEX:
 			self._pending_indexes.append(index)
 
-	def synthesize(self) -> None:
+	def synthesize(self, generation: Optional[int] = None) -> None:
+		"""Synthesize the queued text, as the Speech Generation *generation*.
+
+		Where abort_check is set (the Eloquence Host Process alone), an utterance
+		whose generation is already stale is discarded instead: the cancellation
+		reached the board while this command was still waiting in the Host
+		Channel.  This is the only point at which the proprietary engine can be
+		spared the work.  Measured on it, once eciSynchronize is under way
+		neither eciStop from another thread nor returning 2 from the callback
+		shortens it -- a 1400-character block took 300-340 ms either way -- while
+		eciStop before it starts discards the queued text in 1.5 ms and leaves the
+		engine speaking normally.
+		"""
+		if generation is not None and self.abort_check is not None and self.abort_check(generation):
+			self._dll.eciStop(self._handle)
+			self._audio_buffer.seek(0)
+			self._audio_buffer.truncate(0)
+			self._pending_indexes.clear()
+			self._send_event("audio", data=b"", index=None, final=True)
+			return
 		self._speaking = True
 		self._saw_final_index = False
 		try:
@@ -747,10 +771,10 @@ class EciEngine:
 		# way: measured against openevv v0.3, returning 2 from the audio callback
 		# *during* eciSynchronize segfaults the process, where the proprietary
 		# engine tolerates it.  So an in-flight utterance is never cancelled
-		# through this path.  Cancellation instead advances the Speech Generation
-		# and stops the player, which is also exactly what the Eloquence Host
-		# Process does -- it serves its Host Channel single threaded, so a stop
-		# cannot reach its engine until synthesize() has returned either.
+		# through this path.  Nor would it help: on the proprietary engine it
+		# stops the callbacks but not the work, and eciSynchronize takes just as
+		# long (see synthesize()).  Cancellation instead advances the Speech
+		# Generation and stops the player.
 		if not self._speaking:
 			return 2
 		if message == 0:
@@ -809,6 +833,43 @@ class EciEngine:
 		self._send_event("audio", data=payload, index=index, final=final)
 
 
+class CancelBoard:
+	"""The newest Speech Generation, in memory both processes can see.
+
+	The Eloquence Host Process serves its Host Channel single threaded and reads
+	commands in order, so a stop sent after a synthesize reaches it only once
+	that utterance is done, even when the cancellation came first.  The Synth
+	Driver side publishes each new generation here as it cancels, and the host
+	checks it as each synthesize starts, discarding an utterance that is already
+	stale instead of speaking it to nobody.  It cannot do better than that: the
+	proprietary engine cannot be stopped once eciSynchronize is under way (see
+	EciEngine.synthesize).
+
+	One aligned 32-bit word, written only by the Synth Driver side.  A torn read
+	could only ever see a value between the old generation and the new one,
+	both of which already make the utterance in flight stale, so it needs no
+	lock.
+	"""
+
+	_WORD = struct.Struct("<I")
+
+	def __init__(self, name: str):
+		self.name = name
+		self._map = mmap.mmap(-1, self._WORD.size, tagname=name)
+
+	def publish(self, generation: int) -> None:
+		self._map[: self._WORD.size] = self._WORD.pack(generation & 0xFFFFFFFF)
+
+	def latest(self) -> int:
+		return self._WORD.unpack(self._map[: self._WORD.size])[0]
+
+	def is_stale(self, generation: int) -> bool:
+		return generation < self.latest()
+
+	def close(self) -> None:
+		self._map.close()
+
+
 class EciDispatcher:
 	"""Executes Host Commands against an EciEngine.
 
@@ -826,6 +887,9 @@ class EciDispatcher:
 		self._sink = sink
 		self.engine: Optional[EciEngine] = None
 		self.should_exit = False
+		# Handed to every engine this creates; see EciEngine.abort_check.  Left
+		# unset by the Direct Backend, whose engines must never be aborted.
+		self.abort_check: Optional[Callable[[int], bool]] = None
 		self._handlers = {
 			"initialize": self._handle_initialize,
 			"addText": self._handle_add_text,
@@ -862,6 +926,7 @@ class EciDispatcher:
 			wideband=payload.get("wideband", False),
 		)
 		self.engine = EciEngine(self._sink, config)
+		self.engine.abort_check = self.abort_check
 		self.engine.start()
 		return self.engine.get_state()
 
@@ -877,8 +942,8 @@ class EciDispatcher:
 		self.engine.insert_index(value)
 		return {"status": "ok"}
 
-	def _handle_synthesize(self):
-		self.engine.synthesize()
+	def _handle_synthesize(self, generation: Optional[int] = None):
+		self.engine.synthesize(generation)
 		return {"status": "ok"}
 
 	def _handle_stop(self):

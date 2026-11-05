@@ -147,6 +147,7 @@ Text handling is entirely on the Synth Driver side - `_eloquence_text.build()` h
 - The Eloquence Host Process sends Audio Chunks immediately via Host Channel events
 - `AudioWorker` thread feeds chunks to `nvwave.WavePlayer`
 - Speech Generations prevent stale audio after `stop()` calls
+- The host serves the Host Channel single threaded, so a `synthesize` already sent when NVDA cancels would otherwise be spoken to nobody before the next utterance starts. The client publishes each new Speech Generation on the **Cancel Board** (`_eci_engine.CancelBoard`, one word of named shared memory, named in the `initialize` payload), and the host discards any `synthesize` whose generation is already stale (eciStop before it starts). Over 200 rapid cancels this cut next-utterance delays (>20 ms) from 21 to 4 and p90 keystroke-to-audio from 388 ms to 3.7 ms. It cannot stop an utterance already under way: measured on the proprietary engine, neither `eciStop` from another thread nor returning 2 from the callback shortens `eciSynchronize` (a 1400-character block took 300-340 ms either way). Never enabled on the Direct Backend.
 - Speech Progress Notifications fire when audio completes playback
 
 **Sample rate**: selectable, and the one thing the two backends can genuinely differ on. ECI parameter 5 picks the rate as an index, and what each engine accepts is probed at run time (`_eci_engine.available_sample_rates()`), never hardcoded — `eciSetParam` answers with the parameter's *previous* value, or `-1` when it refuses, which is the only way to ask. Measured:

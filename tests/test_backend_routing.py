@@ -499,6 +499,51 @@ class HostCancellationTests(unittest.TestCase):
 		worker.join(timeout=2)
 		self.assertEqual(result, {"ok": True})
 
+	def _attach_board(self):
+		import uuid
+
+		self.client._cancel_board = self.module._engine.CancelBoard(
+			f"Local\\eloquence-cancel-test-{uuid.uuid4().hex}"
+		)
+		self.addCleanup(self.client._cancel_board.close)
+		return self.client._cancel_board
+
+	def test_stop_publishes_the_new_generation_on_the_board(self):
+		board = self._attach_board()
+		self.client.stop()
+		self.assertEqual(board.latest(), self.pipeline.sequence)
+		self.assertTrue(board.is_stale(self.pipeline.sequence - 1))
+
+	def test_synthesize_carries_its_generation_only_to_a_host_that_attached_the_board(self):
+		self._attach_board()
+		self.pipeline.current_seq = 4
+		self.client.send_command("synthesize", wait=False)
+		self.client._host_aborts = True
+		self.client.send_command("synthesize", wait=False)
+		self.assertEqual([m["payload"] for m in self.connection.sent], [{}, {"generation": 4}])
+
+	def test_initialize_names_the_board_and_learns_whether_the_host_took_it(self):
+		import threading
+
+		board = self._attach_board()
+		for host_reply, expected in (({"cancelBoard": True}, True), ({}, False)):
+			with self.subTest(host_reply=host_reply):
+				self.connection.sent.clear()
+				result = {}
+				worker = threading.Thread(
+					target=lambda: result.update(self.client.send_command("initialize")), daemon=True
+				)
+				worker.start()
+				while not self.client._pending:
+					pass
+				msg_id = next(iter(self.client._pending))
+				self.assertEqual(self.connection.sent[0]["payload"], {"cancelBoard": board.name})
+				event = self.client._pending.pop(msg_id)
+				self.client._responses[msg_id] = {"payload": host_reply}
+				event.set()
+				worker.join(timeout=2)
+				self.assertIs(self.client._host_aborts, expected)
+
 	def test_concurrent_waiting_commands_each_get_their_own_response(self):
 		import threading
 		import time

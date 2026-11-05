@@ -36,7 +36,7 @@ from typing import Optional
 # development checkout it is found through the path added below.
 sys.path.append(os.path.join(os.path.dirname(__file__), "eloquence"))
 sys.path.append(os.path.join(os.path.dirname(__file__), "addon", "synthDrivers"))
-from _eci_engine import EciDispatcher  # noqa: E402
+from _eci_engine import CancelBoard, EciDispatcher  # noqa: E402
 
 
 _HEADER_STRUCT = struct.Struct("!I")
@@ -172,6 +172,32 @@ class HostController:
 	def __init__(self, conn: IpcConnection):
 		self._conn = conn
 		self._dispatcher = EciDispatcher(self._send_event)
+		self._cancel_board: Optional[CancelBoard] = None
+
+	def _handle(self, command: str, payload: dict) -> dict:
+		"""Dispatch one Host Command, attaching the Cancel Board on initialize.
+
+		The board is the one thing only this transport can offer: a way to see a
+		cancellation while eciSynchronize is still running (see CancelBoard).  Its
+		name arrives in the initialize payload, which a host older than the board
+		ignores, and the response says it was attached, so a Synth Driver side
+		never sends a generation to a host that would not take one.
+		"""
+		if command != "initialize":
+			return self._dispatcher.handle(command, payload)
+		payload = dict(payload)
+		name = payload.pop("cancelBoard", None)
+		if name and self._cancel_board is None:
+			try:
+				self._cancel_board = CancelBoard(name)
+			except Exception:
+				LOGGER.exception("Could not open the Cancel Board; cancelling at utterance end")
+		if self._cancel_board is not None:
+			self._dispatcher.abort_check = self._cancel_board.is_stale
+		response = self._dispatcher.handle(command, payload)
+		if self._cancel_board is not None:
+			response = dict(response, cancelBoard=True)
+		return response
 
 	def _send_event(self, event: str, **payload: object) -> None:
 		"""Forward one engine event to the Synth Driver side.
@@ -207,7 +233,7 @@ class HostController:
 					LOGGER.error("Failed to send error response for unknown command %s", command)
 				continue
 			try:
-				payload = self._dispatcher.handle(command, message.get("payload", {}))
+				payload = self._handle(command, message.get("payload") or {})
 				self._conn.send({"type": "response", "id": msg_id, "payload": payload})
 				# Exit after sending response to delete command
 				if self._dispatcher.should_exit:
