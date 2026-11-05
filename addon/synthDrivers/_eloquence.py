@@ -703,6 +703,14 @@ class EloquenceHostClient(EngineClient):
 	def send_command(self, command: str, wait: bool = True, **payload: Any) -> Dict[str, Any]:
 		if not self._host:
 			raise RuntimeError("Host not started")
+		# The lock covers only numbering, registering and sending, so two threads
+		# cannot interleave writes on the Host Channel.  It is deliberately not
+		# held while waiting for the response: it used to be, and stop() on NVDA's
+		# thread then waited out whatever synthesize() the worker had in flight --
+		# measured against the real host, 30 ms behind a paragraph and up to
+		# 610 ms behind a 1400-character block, with NVDA frozen throughout.
+		# Responses are matched by id, and the host serves the Host Channel single
+		# threaded, so commands still run in the order they were sent.
 		with self._command_lock:
 			msg_id = next(self._id_counter)
 			event = threading.Event() if wait else None
@@ -727,19 +735,19 @@ class EloquenceHostClient(EngineClient):
 					self._pending.pop(msg_id, None)
 				raise
 
-			# If we are not going to wait for the response (e.g. stop command), return blank immediately
-			if not wait:
-				return {}
+		# If we are not going to wait for the response (e.g. stop command), return blank immediately
+		if not wait:
+			return {}
 
-			# Wait for response with timeout to avoid infinite blocking
-			if not event.wait(timeout=5.0):
-				self._pending.pop(msg_id, None)
-				LOGGER.error("Command %s timed out after 5 seconds", command)
-				raise RuntimeError(f"Command {command} timed out")
-			response = self._responses.pop(msg_id, {"error": "no response received"})
-			if "error" in response:
-				raise RuntimeError(response["error"])
-			return response.get("payload", {})
+		# Wait for response with timeout to avoid infinite blocking
+		if not event.wait(timeout=5.0):
+			self._pending.pop(msg_id, None)
+			LOGGER.error("Command %s timed out after 5 seconds", command)
+			raise RuntimeError(f"Command {command} timed out")
+		response = self._responses.pop(msg_id, {"error": "no response received"})
+		if "error" in response:
+			raise RuntimeError(response["error"])
+		return response.get("payload", {})
 
 	# ------------------------------------------------------------------
 	def shutdown(self) -> None:
