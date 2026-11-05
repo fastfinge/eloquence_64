@@ -33,21 +33,6 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 
 		self.assertEqual(built, b"`pp1 `da1 `vv77 Hello")
 
-	def test_reloq_fragments_carry_no_inline_volume(self):
-		# ReLoq C pauses at an inline voice change part way through an
-		# utterance, so its fragments leave the volume to the engine parameter.
-		options = _eloquence_text.BuildOptions(
-			volume=77,
-			rate=50,
-			pause_mode=1,
-			backquote_tags=False,
-			abbreviation_dict=True,
-			phrase_prediction=False,
-			utf8=True,
-			inline_volume=False,
-		)
-		self.assertEqual(_eloquence_text.build("a", 65536, options), b"`pp0 `da1 a")
-
 	def test_pause_policy_injection(self):
 		expected = {
 			0: b"`pp0 `da0 `vv80 Hello `p0, world `p0!",

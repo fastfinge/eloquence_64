@@ -141,8 +141,8 @@ class BackendRoutingTests(unittest.TestCase):
 				self.assertIs(self.module.backend_for_voice(voice), self.host)
 
 	def test_text_options_follow_the_engine_that_speaks_the_fragment(self):
-		# The Text Builder picks the openevv bracket fixes or ReLoq C's UTF-8 from
-		# this, so a language the engine lacks must get neither.
+		# The Text Builder picks the openevv bracket fixes from this, so a
+		# language the engine lacks must not get them.
 		for engine in (self.module.OPENEVV, self.module.RELOQ):
 			with self.subTest(engine=engine):
 				self.module._direct_engine = engine
@@ -372,14 +372,14 @@ class DirectInitializePayloadTests(unittest.TestCase):
 		self.assertNotEqual(payload["eciPath"], r"C:\eci.dll")
 		self.assertFalse(payload["rewriteIni"])
 
-	def test_openevv_gets_wideband_and_reloq_gets_its_adapter(self):
+	def test_only_openevv_gets_wideband(self):
 		base = {"eciPath": r"C:\eci.dll", "dataDirectory": r"C:\dicts", "language": "enu"}
 		openevv = self.module._direct_initialize_payload(base, self.module.OPENEVV)
 		reloq = self.module._direct_initialize_payload(base, self.module.RELOQ)
 		self.assertTrue(openevv["wideband"])
-		self.assertNotIn("reloq", openevv)
-		self.assertTrue(reloq["reloq"])
 		self.assertNotIn("wideband", reloq)
+		# ReLoq C needs no adapter of its own since 1.1.
+		self.assertEqual(set(reloq), set(base) | {"eciPath", "rewriteIni"})
 		self.assertEqual(Path(openevv["eciPath"]).parent.name, "openevv")
 		self.assertEqual(Path(reloq["eciPath"]).parent.name, "reloq")
 		# Both engines read the add-on's own dictionaries.

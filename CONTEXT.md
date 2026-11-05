@@ -45,11 +45,11 @@ The MIT-licensed reimplementation of IBM's Embedded ViaVoice that ships a 64-bit
 _Avoid_: openevv, open evv, the new engine, the 64-bit DLL
 
 **ReLoq C Engine**:
-hozosch/Reloq-C's independent C engine, whose 64-bit library has an ECI-shaped interface that differs from ECI in voice parameters, language switching, text input and dictionaries. It is taken out of ReLoq C's own NVDA add-on at build time and loaded by the Direct Backend.
+hozosch/Reloq-C's independent C engine, whose 64-bit library implements the ECI interface closely enough, from 1.1, to be driven exactly like the openevv Engine. It is taken out of ReLoq C's own NVDA add-on at build time and loaded by the Direct Backend.
 _Avoid_: ReLoq, Reloq, reloqC, the C engine
 
 **Engine Language Coverage**:
-The set of Voice Identities an Eloquence Engine reports it can create, read from the engine at speech-driver start rather than hardcoded. The ReLoq C Engine's enumeration reports nothing by design, so its coverage is read by asking it to create each one. A Voice Identity outside the Direct Backend's coverage is served by the Eloquence Host Process instead.
+The set of Voice Identities an Eloquence Engine reports it can create, read from the engine at speech-driver start rather than hardcoded. A Voice Identity outside the Direct Backend's coverage is served by the Eloquence Host Process instead.
 _Avoid_: supported languages, available languages, language list
 
 **Engine Fallback**:

@@ -1,258 +1,63 @@
 """ReLoq C's eci.dll, the Direct Backend's second engine.
 
-It exports the ECI shape but differs from it in ways EciEngine has to absorb,
-all measured against ReLoq C 1.0.1:
+ReLoq C 1.0.1 exported the ECI shape but not its behaviour, and EciEngine
+carried an adapter for it.  ReLoq C 1.1 closed every gap the adapter covered
+(hozosch/Reloq-C#2, #5 and #6 among them), so it is now driven exactly as
+openevv is.  These tests pin the behaviour that makes that safe, each against
+the real DLL, so a regression upstream shows up here rather than in NVDA:
 
-* No eciSetVoiceParam, eciGetVoiceParam or eciCopyVoice.  The voice is set
-  through its own parameters (RELOQ_VOICE_PARAMS), and variants are emulated.
-* eciSetParam(9) is refused for any language but the handle's own, so each
-  language needs a handle of its own.
-* eciAddText decodes everything as cp1252; eciAddTextUtf8 takes every language.
-* eciSynthesize fails until RELOQ_GENERIC_VOICE is on, and backquote commands
-  are spoken until RELOQ_PROCESS_TAGS is on.
-* eciGetAvailableLanguages reports nothing, by design, while eciNewEx refuses
-  only languages it really lacks.
+* eciSetVoiceParam, eciGetVoiceParam and eciCopyVoice exist and take effect.
+* eciSetParam(9) switches language on a live handle.
+* eciAddText takes the per-language Engine Encodings, CJK included.
+* ECI_INPUT_TYPE turns on backquote commands; nothing else needs switching on.
+* eciGetAvailableLanguages reports what it speaks.
+* A voice change between eciAddText calls applies from that point, so NVDA's
+  capital-letter pitch raise is heard, and an inline `vv opening a later
+  fragment adds no pause.
+* Volume works across its whole range in every language, not only German.
 
-The fake below models those rules; the last class drives the real DLL when the
-build has fetched it and Python is 64-bit.
+They need the fetched engine and 64-bit Python, and skip otherwise.
 """
 
 import array
-import ctypes
 import os
 import statistics
 import struct
-import types
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from addon.synthDrivers import _eci_engine as engine
+from addon.synthDrivers import _eloquence_text
 
 ENU = engine.LANGS["enu"]
 DEU = engine.LANGS["deu"]
 JPN = engine.LANGS["jpn"]
 
-
-class _ReloqDll:
-	"""Per-handle parameters, and ReLoq C's refusals."""
-
-	def __init__(self, languages=(ENU, DEU, JPN)):
-		self.languages = set(languages)
-		self.handles = {}
-		self.deleted = []
-		self.utf8_text = []
-		self.dictionary_paths = []
-		self.inserted_pitches = []
-		self.next_handle = 1000
-
-	def eciNewEx(self, language):
-		if language not in self.languages:
-			return None
-		self.next_handle += 1
-		self.handles[self.next_handle] = {engine.ECI_LANGUAGE_PARAM: language, engine.ECI_SAMPLE_RATE: 1}
-		return self.next_handle
-
-	def eciDelete(self, handle):
-		self.deleted.append(handle)
-
-	def eciSetParam(self, handle, param, value):
-		params = self.handles[handle]
-		if param == engine.ECI_LANGUAGE_PARAM and value != params[param]:
-			return -1
-		if param in (engine.ECI_INPUT_TYPE, 41, 42):
-			return -1
-		previous = params.get(param, 0)
-		params[param] = value
-		return previous
-
-	def eciGetParam(self, handle, param):
-		return self.handles[handle].get(param, 0)
-
-	def eciAddTextUtf8(self, handle, text, length, character_mode):
-		self.utf8_text.append((handle, text, length, character_mode))
-		return 1
-
-	def eciInsertPitch(self, handle, value):
-		self.inserted_pitches.append((handle, value))
-		return 1
-
-	def eciSetDictionaryPath(self, handle, path):
-		self.dictionary_paths.append((handle, path))
-		return 1
-
-	def eciAddText(self, handle, text):
-		raise AssertionError("ReLoq C must be given UTF-8 through eciAddTextUtf8")
-
-	def eciSetVoiceParam(self, *args):
-		raise AssertionError("ReLoq C does not export eciSetVoiceParam")
-
-	def eciGetVoiceParam(self, *args):
-		raise AssertionError("ReLoq C does not export eciGetVoiceParam")
-
-	def eciCopyVoice(self, *args):
-		raise AssertionError("ReLoq C does not export eciCopyVoice")
-
-	def __getattr__(self, name):
-		if name.startswith("eci") and name.endswith("Dict"):
-			raise AssertionError(f"ReLoq C does not export {name}")
-
-		def anything(*args):
-			return 1
-
-		return anything
-
-
-def _start(dll, variant=0, data_directory=""):
-	config = engine.EngineConfig(
-		eci_path="eci.dll",
-		data_directory=data_directory,
-		language_code="enu",
-		enable_abbrev_dict=True,
-		enable_phrase_prediction=True,
-		voice_variant=variant,
-		rewrite_ini=False,
-		reloq=True,
-	)
-	instance = engine.EciEngine(lambda event, **payload: None, config)
-	with mock.patch.object(ctypes.windll, "LoadLibrary", return_value=dll), mock.patch.object(
-		engine.EciEngine, "_declare_signatures"
-	):
-		instance.start()
-	return instance
-
-
-class StartTests(unittest.TestCase):
-	def test_generic_voice_and_tag_processing_are_turned_on(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		params = dll.handles[instance._handle]
-		self.assertEqual(params[engine.RELOQ_GENERIC_VOICE], 1)
-		self.assertEqual(params[engine.RELOQ_PROCESS_TAGS], 1)
-
-	def test_dictionaries_load_through_its_own_entry_point(self):
-		dll = _ReloqDll()
-		directory = os.path.dirname(__file__)
-		instance = _start(dll, data_directory=directory)
-		self.assertEqual(dll.dictionary_paths, [(instance._handle, directory.encode("utf-8"))])
-
-	def test_a_variant_is_emulated_from_the_preset_table(self):
-		dll = _ReloqDll()
-		instance = _start(dll, variant=2)
-		params = dll.handles[instance._handle]
-		gender, head, pitch, inflection, roughness, breathiness, volume = engine.RELOQ_VOICE_PRESETS[2]
-		self.assertEqual(params[engine.RELOQ_GENDER], gender)
-		self.assertEqual(params[engine.RELOQ_VOICE_PARAMS[engine.HSZ]], head)
-		self.assertEqual(params[engine.RELOQ_VOICE_PARAMS[engine.BTH]], breathiness)
-		self.assertEqual(instance.get_state()["voiceParams"][engine.PITCH], pitch)
-		self.assertEqual(instance.get_state()["voiceParams"][engine.FLUCTUATION], inflection)
-
-
-class VoiceTests(unittest.TestCase):
-	def test_voice_params_go_through_its_parameters(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		instance.set_voice_param(engine.RATE, 120)
-		self.assertEqual(dll.handles[instance._handle][engine.RELOQ_VOICE_PARAMS[engine.RATE]], 120)
-		self.assertEqual(instance.get_state()["voiceParams"][engine.RATE], 120)
-
-	def test_a_temporary_pitch_is_queued_in_the_text(self):
-		# NVDA's capital-letter raise and its reset are both queued before the
-		# utterance is synthesized, and ReLoq C reads its pitch parameter only
-		# then, so setting the parameter would leave only the reset audible.
-		dll = _ReloqDll()
-		instance = _start(dll)
-		instance.set_voice_param(engine.PITCH, 40)
-		instance.set_voice_param(engine.PITCH, 90, temporary=True)
-		instance.set_voice_param(engine.PITCH, 40, temporary=True)
-		self.assertEqual(dll.inserted_pitches, [(instance._handle, 90), (instance._handle, 40)])
-		self.assertEqual(dll.handles[instance._handle][engine.RELOQ_VOICE_PARAMS[engine.PITCH]], 40)
-		self.assertEqual(instance.get_state()["voiceParams"][engine.PITCH], 40)
-
-	def test_other_temporary_changes_still_set_the_parameter(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		instance.set_voice_param(engine.RATE, 80)
-		instance.set_voice_param(engine.RATE, 120, temporary=True)
-		self.assertEqual(dll.handles[instance._handle][engine.RELOQ_VOICE_PARAMS[engine.RATE]], 120)
-		self.assertEqual(instance.get_state()["voiceParams"][engine.RATE], 80)
-		self.assertEqual(dll.inserted_pitches, [])
-
-	def test_text_goes_in_as_utf8(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		text = "`vv100 こんにちは".encode("utf-8")
-		instance.add_text(text)
-		self.assertEqual(dll.utf8_text, [(instance._handle, text, len(text), 0)])
-
-
-class LanguageTests(unittest.TestCase):
-	def test_a_language_change_moves_to_a_handle_of_its_own(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		english = instance._handle
-		instance.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
-		self.assertNotEqual(instance._handle, english)
-		self.assertEqual(dll.handles[instance._handle][engine.ECI_LANGUAGE_PARAM], DEU)
-		self.assertEqual(instance.get_state()["params"][engine.ECI_LANGUAGE_PARAM], DEU)
-
-	def test_returning_to_a_language_reuses_its_handle(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		english = instance._handle
-		instance.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
-		instance.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
-		self.assertEqual(instance._handle, english)
-		self.assertEqual(len(dll.handles), 2)
-
-	def test_the_new_handle_carries_the_voice_rate_and_setup(self):
-		dll = _ReloqDll()
-		instance = _start(dll, variant=4)
-		instance.set_voice_param(engine.RATE, 140)
-		instance.set_sample_rate(22050)
-		instance.set_param(engine.ECI_LANGUAGE_PARAM, JPN)
-		params = dll.handles[instance._handle]
-		self.assertEqual(params[engine.RELOQ_VOICE_PARAMS[engine.RATE]], 140)
-		self.assertEqual(params[engine.RELOQ_GENDER], engine.RELOQ_VOICE_PRESETS[4][0])
-		self.assertEqual(params[engine.ECI_SAMPLE_RATE], 2)
-		self.assertEqual(params[engine.RELOQ_GENERIC_VOICE], 1)
-		self.assertEqual(params[engine.RELOQ_PROCESS_TAGS], 1)
-
-	def test_a_rate_change_reaches_every_handle(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		instance.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
-		instance.set_sample_rate(44100)
-		for params in dll.handles.values():
-			self.assertEqual(params[engine.ECI_SAMPLE_RATE], 5)
-
-	def test_delete_releases_every_handle(self):
-		dll = _ReloqDll()
-		instance = _start(dll)
-		instance.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
-		instance.delete()
-		self.assertEqual(sorted(dll.deleted), sorted(dll.handles))
-
-
-class ConstructibleLanguagesTests(unittest.TestCase):
-	def test_only_languages_it_can_create_are_reported(self):
-		dll = _ReloqDll(languages=(ENU, JPN))
-		# Plain functions, which take the argtypes the probe declares, as ctypes'
-		# own function pointers do and bound methods do not.
-		library = types.SimpleNamespace(
-			eciNewEx=lambda language: dll.eciNewEx(language),
-			eciDelete=lambda handle: dll.eciDelete(handle),
-		)
-		with mock.patch.object(ctypes.windll, "LoadLibrary", return_value=library):
-			self.assertEqual(engine.constructible_languages("eci.dll"), frozenset({ENU, JPN}))
-		self.assertEqual(len(dll.deleted), 2)
-
-	def test_a_library_that_will_not_load_reports_nothing(self):
-		with mock.patch.object(ctypes.windll, "LoadLibrary", side_effect=OSError):
-			self.assertEqual(engine.constructible_languages("eci.dll"), frozenset())
-
-
 _REAL_DLL = Path(__file__).parents[1] / "addon" / "synthDrivers" / "reloq" / "eci.dll"
+# The add-on's own dictionaries are fetched by Dictionary Update rather than
+# kept in the repository, so the dictionary test runs only where an installed
+# copy of the add-on has them.
+_INSTALLED_DATA = (
+	Path(os.environ.get("APPDATA", "")) / "nvda" / "addons" / "Eloquence" / "synthDrivers" / "eloquence"
+)
+
+
+def _temporary(param, value):
+	"""A temporary voice change, as the driver queues one between fragments."""
+	return lambda instance: instance.set_voice_param(param, value, temporary=True)
+
+
+def _options(**overrides):
+	values = dict(
+		volume=100,
+		rate=50,
+		pause_mode=0,
+		backquote_tags=False,
+		abbreviation_dict=False,
+		phrase_prediction=False,
+	)
+	values.update(overrides)
+	return _eloquence_text.BuildOptions(**values)
 
 
 @unittest.skipUnless(
@@ -260,61 +65,55 @@ _REAL_DLL = Path(__file__).parents[1] / "addon" / "synthDrivers" / "reloq" / "ec
 	"needs the fetched ReLoq C engine and 64-bit Python",
 )
 class RealEngineTests(unittest.TestCase):
-	def setUp(self):
+	def _start(self, data_directory=""):
 		self.events = []
 		config = engine.EngineConfig(
 			eci_path=str(_REAL_DLL),
-			data_directory=str(Path(__file__).parents[1] / "addon" / "synthDrivers" / "eloquence"),
+			data_directory=data_directory,
 			language_code="enu",
 			enable_abbrev_dict=False,
 			enable_phrase_prediction=False,
 			voice_variant=1,
 			rewrite_ini=False,
-			reloq=True,
 		)
-		self.engine = engine.EciEngine(lambda event, **payload: self.events.append((event, payload)), config)
-		self.engine.start()
-		self.addCleanup(self.engine.delete)
+		instance = engine.EciEngine(lambda event, **payload: self.events.append((event, payload)), config)
+		instance.start()
+		self.addCleanup(instance.delete)
+		return instance
+
+	def setUp(self):
+		self.engine = self._start()
 
 	def _speak(self, *parts):
+		"""Queue *parts* and synthesize; return the samples and the indexes.
+
+		A str is built by the Eloquence Text Builder for the current language,
+		bytes go in as they are, an int is a Speech Index, and a callable is run
+		against the engine at its place in the sequence.
+		"""
 		self.events.clear()
+		voice_id = self.engine.get_state()["params"][engine.ECI_LANGUAGE_PARAM]
 		for part in parts:
 			if isinstance(part, int):
 				self.engine.insert_index(part)
+			elif isinstance(part, bytes):
+				self.engine.add_text(part)
+			elif callable(part):
+				part(self.engine)
 			else:
-				self.engine.add_text(part.encode("utf-8"))
+				self.engine.add_text(_eloquence_text.build(part, voice_id, _options()))
 		self.engine.synthesize()
-		audio = sum(len(p["data"]) for e, p in self.events if e == "audio") // 2
-		indexes = [p["index"] for e, p in self.events if e == "audio" and p["index"] is not None]
-		return audio, indexes
-
-	def test_every_language_it_reports_speaks(self):
-		languages = engine.constructible_languages(str(_REAL_DLL))
-		self.assertTrue(languages)
-		for voice_id in sorted(languages):
-			with self.subTest(language=engine.LANG_BY_ID[voice_id]):
-				self.engine.set_param(engine.ECI_LANGUAGE_PARAM, voice_id)
-				audio, _indexes = self._speak("`pp0 `da1 `vv100 1 2 3.")
-				self.assertGreater(audio, 0)
-
-	def test_the_text_builder_preamble_is_obeyed_not_spoken(self):
-		plain, _ = self._speak("Hello world, this is a test.")
-		annotated, _ = self._speak("`pp0 `da1 `vv80 Hello `p0, world `p0, this is a test.")
-		self.assertLess(abs(annotated - plain) / plain, 0.25)
-
-	def test_indexes_arrive_in_order(self):
-		_audio, indexes = self._speak("First part.", 5, " Second part.", 6, "", engine.FINAL_INDEX)
-		self.assertEqual(indexes, [5, 6])
-
-	def test_cjk_text_is_spoken(self):
-		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, JPN)
-		audio, _ = self._speak("こんにちは世界")
-		self.assertGreater(audio, 0)
-
-	def _f0(self):
-		"""Median fundamental of the last utterance, by autocorrelation."""
 		pcm = array.array("h")
 		pcm.frombytes(b"".join(p["data"] for e, p in self.events if e == "audio"))
+		indexes = [p["index"] for e, p in self.events if e == "audio" and p["index"] is not None]
+		return pcm, indexes
+
+	@staticmethod
+	def _rms(pcm):
+		return (sum(v * v for v in pcm) / len(pcm)) ** 0.5
+
+	def _f0(self, pcm):
+		"""Median fundamental, by autocorrelation."""
 		rate = self.engine.sample_rate
 		lags = range(rate // 400, rate // 60)
 		estimates = []
@@ -330,29 +129,8 @@ class RealEngineTests(unittest.TestCase):
 				estimates.append(rate / best)
 		return statistics.median(estimates)
 
-	def test_a_capital_letter_is_raised(self):
-		# The sequence the driver sends for a capital with "Capital pitch
-		# change" on: reset to base at the start of the utterance, raise, the
-		# letter, reset -- all before synthesis.  Setting the parameter for each
-		# step left only the reset audible (114.8 Hz either way on 1.0.1).
-		self.engine.set_voice_param(engine.PITCH, 65)
-		self._speak("`vv100 A")
-		plain = self._f0()
-		self.events.clear()
-		self.engine.set_voice_param(engine.PITCH, 65, temporary=True)
-		self.engine.set_voice_param(engine.PITCH, 95, temporary=True)
-		self.engine.add_text("`vv100 A".encode("utf-8"))
-		self.engine.set_voice_param(engine.PITCH, 65, temporary=True)
-		self.engine.synthesize()
-		self.assertGreater(self._f0(), plain * 1.5)
-		self.assertEqual(self.engine.get_state()["voiceParams"][engine.PITCH], 65)
-		# And the raise ends with the utterance.
-		self._speak("`vv100 A")
-		self.assertAlmostEqual(self._f0(), plain, delta=plain * 0.05)
-
-	def _longest_inner_silence(self):
-		pcm = array.array("h")
-		pcm.frombytes(b"".join(p["data"] for e, p in self.events if e == "audio"))
+	@staticmethod
+	def _longest_inner_silence(pcm):
 		loud = [k for k, v in enumerate(pcm) if abs(v) > 300]
 		longest = run = 0
 		for v in pcm[loud[0] : loud[-1]]:
@@ -360,37 +138,105 @@ class RealEngineTests(unittest.TestCase):
 			longest = max(longest, run)
 		return longest
 
+	def test_it_reports_every_language_it_speaks(self):
+		languages = engine.available_languages(str(_REAL_DLL))
+		self.assertTrue(set(engine.LANGS.values()) <= languages)
+		for voice_id in sorted(engine.LANGS.values()):
+			with self.subTest(language=engine.LANG_BY_ID[voice_id]):
+				self.engine.set_param(engine.ECI_LANGUAGE_PARAM, voice_id)
+				pcm, _indexes = self._speak("1 2 3.")
+				self.assertGreater(len(pcm), 0)
+
+	def test_a_language_change_keeps_the_handle(self):
+		handle = self.engine._handle
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
+		self.assertEqual(self.engine._handle, handle)
+		switched, _ = self._speak("Guten Tag, wie geht es Ihnen?")
+		fresh = self._start()
+		fresh.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
+		self.engine = fresh
+		self.assertEqual(self._speak("Guten Tag, wie geht es Ihnen?")[0], switched)
+
+	def test_cjk_text_goes_in_with_its_engine_encoding(self):
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, JPN)
+		encoded, _ = self._speak("こんにちは世界")
+		self.assertGreater(len(encoded), 0)
+		# The same text as cp1252 would have been "?" throughout.
+		replaced, _ = self._speak("こんにちは世界".encode("cp1252", errors="replace"))
+		self.assertNotEqual(encoded, replaced)
+
+	def test_the_text_builder_preamble_is_obeyed_not_spoken(self):
+		plain, _ = self._speak(b"Hello world, this is a test.")
+		annotated, _ = self._speak("Hello, world, this is a test.")
+		self.assertLess(abs(len(annotated) - len(plain)) / len(plain), 0.25)
+
+	def test_indexes_arrive_in_order(self):
+		_pcm, indexes = self._speak("First part.", 5, " Second part.", 6, b"", engine.FINAL_INDEX)
+		self.assertEqual(indexes, [5, 6])
+
+	def test_a_variant_comes_from_copy_voice(self):
+		self.engine.copy_voice(2)
+		voice = self.engine.get_state()["voiceParams"]
+		self.assertEqual(voice[engine.PITCH], 81)
+		self.assertEqual(voice[engine.BTH], 50)
+
+	def test_a_capital_letter_is_raised(self):
+		# The sequence the driver sends for a capital with "Capital pitch
+		# change" on: reset to base at the start of the utterance, raise, the
+		# letter, reset -- all before synthesis.  ReLoq C 1.0.1 read the pitch
+		# only at synthesis, so only the reset was heard.
+		self.engine.set_voice_param(engine.PITCH, 65)
+		plain = self._f0(self._speak("A")[0])
+		raised, _ = self._speak(
+			_temporary(engine.PITCH, 65), _temporary(engine.PITCH, 95), "A", _temporary(engine.PITCH, 65)
+		)
+		self.assertGreater(self._f0(raised), plain * 1.5)
+		self.assertEqual(self.engine.get_state()["voiceParams"][engine.PITCH], 65)
+
+	def test_a_rate_change_part_way_through_applies_from_there(self):
+		def rate(value):
+			return _temporary(engine.RATE, value)
+
+		first, second = "The first half of the sentence. ", "The second half of the sentence."
+		slow, _ = self._speak(rate(50), first, second)
+		fast, _ = self._speak(rate(150), first, second)
+		mixed, _ = self._speak(rate(50), first, rate(150), second)
+		self.assertLess(len(fast) * 1.2, len(mixed))
+		self.assertLess(len(mixed) * 1.2, len(slow))
+
 	def test_a_split_utterance_has_no_pause_at_the_split(self):
 		# NVDA speaks "Alt+a" in a dialog as "Alt+" then "a" in character mode,
-		# which reaches the engine as two fragments.  With `vv opening the
-		# second, ReLoq C paused 4708 samples between them.
-		from addon.synthDrivers import _eloquence_text
+		# which reaches the engine as two fragments, each opening with `vv.
+		# ReLoq C 1.0.1 paused 4708 samples between them.
+		whole = self._longest_inner_silence(self._speak("Apply  button  Alt+  a")[0])
+		split = self._longest_inner_silence(self._speak("Apply  button  Alt+  ", "a")[0])
+		self.assertLessEqual(split, whole * 1.2)
 
-		options = _eloquence_text.BuildOptions(
-			volume=100,
-			rate=50,
-			pause_mode=0,
-			backquote_tags=False,
-			abbreviation_dict=False,
-			phrase_prediction=False,
-			utf8=True,
-			inline_volume=False,
-		)
-		enu = engine.LANGS["enu"]
-		self._speak(_eloquence_text.build("Apply  button  Alt+  a", enu, options).decode("utf-8"))
-		whole = self._longest_inner_silence()
-		self._speak(
-			_eloquence_text.build("Apply  button  Alt+  ", enu, options).decode("utf-8"),
-			_eloquence_text.build("a", enu, options).decode("utf-8"),
-		)
-		self.assertLessEqual(self._longest_inner_silence(), whole * 1.2)
+	def test_volume_goes_all_the_way_down_in_every_language(self):
+		# Below 80 ReLoq C 1.0.1 sounded the same as 80 in every language but
+		# German, and 0 was not silent.
+		for voice_id in (ENU, engine.LANGS["fra"], DEU):
+			with self.subTest(language=engine.LANG_BY_ID[voice_id]):
+				self.engine.set_param(engine.ECI_LANGUAGE_PARAM, voice_id)
+				self.engine.set_voice_param(engine.VLM, 100)
+				loud = self._rms(self._speak(b"Hello there, how are you today?")[0])
+				self.engine.set_voice_param(engine.VLM, 20)
+				quiet = self._rms(self._speak(b"Hello there, how are you today?")[0])
+				self.assertLess(quiet, loud / 4)
 
 	def test_rate_changes_the_length(self):
 		self.engine.set_voice_param(engine.RATE, 50)
 		slow, _ = self._speak("Hello world, this is a test.")
 		self.engine.set_voice_param(engine.RATE, 150)
 		fast, _ = self._speak("Hello world, this is a test.")
-		self.assertLess(fast, slow)
+		self.assertLess(len(fast), len(slow))
+
+	@unittest.skipUnless((_INSTALLED_DATA / "ENUmain.dic").exists(), "needs the add-on's dictionaries")
+	def test_dictionaries_load_through_the_standard_calls(self):
+		without, _ = self._speak(b"Hermione.")
+		self.engine = self._start(str(_INSTALLED_DATA))
+		with_dictionaries, _ = self._speak(b"Hermione.")
+		self.assertNotEqual(len(with_dictionaries), len(without))
 
 
 if __name__ == "__main__":

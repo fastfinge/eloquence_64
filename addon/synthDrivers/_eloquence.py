@@ -1021,8 +1021,7 @@ def direct_engine_for_voice(voice_id) -> Optional[str]:
 
 	The Eloquence Text Builder needs this per fragment, because what it does for
 	one engine must not reach another: the openevv bracket workaround would be
-	wrong on the proprietary engine, which does not have the bug, and the UTF-8
-	that ReLoq C takes would be garbage to either of the others.
+	wrong on the proprietary engine and on ReLoq C, neither of which has the bug.
 	"""
 	if _direct_client is None or backend_for_voice(voice_id) is not _direct_client:
 		return None
@@ -1070,25 +1069,24 @@ def _direct_initialize_payload(payload: Dict[str, Any], engine: Optional[str] = 
 
 	Only a few things differ from the host's payload: which library to load;
 	that both 64-bit engines resolve their own data relative to that library and
-	need none of the C:\\dummy\\ rewriting the proprietary ECI.INI does; and one
-	engine-specific switch -- eciWideband for openevv (see
-	_eci_engine.ECI_WIDEBAND), and for ReLoq C the flag that adapts the wrapper
-	to it (see _eci_engine.EngineConfig.reloq).
+	need none of the C:\\dummy\\ rewriting the proprietary ECI.INI does; and
+	eciWideband for openevv (see _eci_engine.ECI_WIDEBAND).  ReLoq C has no such
+	parameter, and from 1.1 needs nothing else of its own: it takes the same
+	standard ECI calls as openevv.
 
 	``dataDirectory`` is passed through unchanged, and deliberately so.  It points
 	at the proprietary engine's directory, where the .dic files live, which is
 	where both backends read them from regardless of which library is loaded.
 	openevv v0.3 could not use them -- see _load_dictionaries() -- but the build
-	no longer ships v0.3.  ReLoq C reads the same files, through its own
+	no longer ships v0.3.  ReLoq C 1.1.1 loads the same files through the same
+	eciNewDict/eciLoadDict calls, with the same effect as its own
 	eciSetDictionaryPath.
 	"""
 	engine = engine or _direct_engine or OPENEVV
 	payload = dict(payload)
 	payload["eciPath"] = direct_engine_path(engine)
 	payload["rewriteIni"] = False
-	if engine == RELOQ:
-		payload["reloq"] = True
-	else:
+	if engine != RELOQ:
 		payload["wideband"] = True
 	return payload
 
@@ -1296,10 +1294,6 @@ def initialize(indexCallback=None):
 			)
 		else:
 			languages = _engine.available_languages(path)
-			if not languages and engine == RELOQ:
-				# ReLoq C's enumeration reports nothing by design; see
-				# _engine.constructible_languages().
-				languages = _engine.constructible_languages(path)
 			if languages:
 				_direct_client = DirectEngineClient(_pipeline, path)
 				_direct_engine = engine
