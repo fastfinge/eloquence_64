@@ -56,6 +56,24 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 			b"`pp0 `da0 `vv80 literal ` tag",
 		)
 
+	def test_a_continuation_fragment_carries_no_volume_command(self):
+		# openevv ends the phrase at any voice change, even one to the volume it
+		# already has; see Driver.speak() and tests/test_openevv_phrasing.py.
+		self.assertEqual(
+			_eloquence_text.build("Hello", 65536, self._options(), opens_utterance=False),
+			b"`pp0 `da0 Hello",
+		)
+
+	def test_a_continuation_opening_on_a_mark_keeps_its_pause_command(self):
+		# The volume prefix is what puts a space before that mark, and the Pause
+		# Policy needs one there; it has to see the fragment as it always did.
+		opening = _eloquence_text.build(", and then", 65536, self._options(pause_mode=0))
+		continuation = _eloquence_text.build(
+			", and then", 65536, self._options(pause_mode=0), opens_utterance=False
+		)
+		self.assertEqual(opening, b"`pp0 `da0 `vv80  `p0, and then")
+		self.assertEqual(continuation, b"`pp0 `da0  `p0, and then")
+
 	def test_time_fix(self):
 		self.assertEqual(
 			_eloquence_text.build("Meet at 3:45:12", 65536, self._options()),

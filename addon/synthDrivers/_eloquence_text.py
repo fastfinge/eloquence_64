@@ -91,8 +91,17 @@ def _engine_encode(text: str, voice_id) -> bytes:
 	return text_bytes
 
 
-def build(text: str, voice_id: int, options: BuildOptions) -> bytes:
-	"""Build engine-ready Eloquence Text bytes for a Voice ID."""
+def build(text: str, voice_id: int, options: BuildOptions, opens_utterance: bool = True) -> bytes:
+	"""Build engine-ready Eloquence Text bytes for a Voice ID.
+
+	Only the fragment that opens an utterance sets the volume inline.  openevv
+	follows IBM's 4.3 and ends the stretch of text at any voice change, `vv to
+	the volume it already has included, so a `vv opening every fragment put a
+	pause and a fresh intonation wherever NVDA split a sentence -- at every line
+	break in Say All.  ETI's 6.1 does not.  The volume is the engine's already,
+	through eciSetVoiceParam, so later fragments lose nothing by going without.
+	See tests/test_openevv_phrasing.py.
+	"""
 
 	try:
 		voice_id = int(voice_id)
@@ -106,11 +115,17 @@ def build(text: str, voice_id: int, options: BuildOptions) -> bytes:
 		text = _text_preprocessing.attach_spaced_brackets(text)
 	if not options.backquote_tags:
 		text = text.replace("`", " ")
-	text = f"`vv{options.volume} {text}"
+	# The Pause Policy reads the character before each mark, and this prefix is
+	# what gives a fragment opening on a mark a space there.  So it stays on
+	# until the policy has run, whichever fragment this is, and only then goes.
+	volume = f"`vv{options.volume} "
+	text = volume + text
 	if options.pause_mode == 0:
 		text = _insert_pause_commands(text, "`p0", options.openevv_bracket_fixes)
 	elif options.pause_mode == 2:
 		text = _insert_pause_commands(text, "`p1", options.openevv_bracket_fixes)
+	if not opens_utterance:
+		text = text[len(volume) :]
 	text = time_re.sub(r"\1:\2 \3", text)
 	text = f"`da{int(options.abbreviation_dict)} {text}"
 	text = f"`pp{int(options.phrase_prediction)} {text}"

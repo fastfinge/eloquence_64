@@ -327,6 +327,35 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		self.assertIn("addText", [command for command, _payload in self.backend.commands])
 		self.assertIn("synthesize", [command for command, _payload in self.backend.commands])
 
+	def test_only_the_first_text_fragment_sets_the_volume(self):
+		# Say All puts an index at every line break, so a sentence that wraps is
+		# two fragments.  openevv ends the phrase at an inline `vv -- a pause
+		# and a fresh intonation in the middle of the sentence -- where 6.1 does
+		# not, and the volume is already the engine's through eciSetVoiceParam.
+		driver = self._new_driver()
+		commands = self.driver_module
+		driver.speak(
+			[
+				"The committee reviewed the proposal and",
+				commands.IndexCommand(1),
+				"decided to approve it",
+				commands.LangChangeCommand("de-DE"),
+				"und dann",
+				commands.BreakCommand(100),
+				"weiter.",
+			]
+		)
+		outlist, _seq = self.eloquence.synth_queue.get_nowait()
+		texts = [args[0] for func, args in outlist if func is self.eloquence.speak]
+		# Every built fragment opens with `pp; breaks and the trailing pause are
+		# bare `p commands.
+		with_text = [text for text in texts if text.startswith(b"`pp")]
+		self.assertEqual(len(with_text), 4)
+		self.assertIn(b"`vv", with_text[0])
+		for text in with_text[1:]:
+			with self.subTest(text=text):
+				self.assertNotIn(b"`vv", text)
+
 	def test_cancelling_advances_the_generation_the_driver_reads(self):
 		before = self.eloquence.current_generation()
 		self.eloquence.stop()
