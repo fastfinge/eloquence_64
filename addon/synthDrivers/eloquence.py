@@ -734,7 +734,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 				fragment_options = engine_options.get(
 					_eloquence.direct_engine_for_voice(sequence_voice), options
 				)
-				s = _eloquence_text.build(s, voice_id=sequence_voice, options=fragment_options)
+				# Only the first text sets the volume inline: a `vv anywhere later
+				# makes openevv end the phrase there, which at an index -- every line
+				# break in Say All -- is a pause in the middle of a sentence.
+				s = _eloquence_text.build(
+					s,
+					voice_id=sequence_voice,
+					options=fragment_options,
+					opens_utterance=last is None,
+				)
 				outlist.append((_eloquence.speak, (s,)))
 				last = s
 				queued_speech = True
