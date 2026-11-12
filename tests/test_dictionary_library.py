@@ -71,6 +71,27 @@ class SettingsTests(LibraryTestCase):
 		self.assertTrue(settings.language("enu").personal)
 		self.assertTrue(settings.language("eng").dialect)
 
+	def test_a_new_installation_lists_the_two_known_sources(self):
+		self.assertEqual(
+			library.load_settings(self.paths).sources,
+			["eigencrow/IBMTTSDictionaries", "Mohamed00/AltIBMTTSDictionaries"],
+		)
+
+	def test_removing_every_source_sticks(self):
+		self.settings.sources.clear()
+		library.save_settings(self.paths, self.settings)
+		self.assertEqual(library.load_settings(self.paths).sources, [])
+
+	def test_removing_a_sets_rows_leaves_the_other_rows(self):
+		self.settings.language("enu").rows += [Row("set", "github.a.b", on=True), Row("set", "github.c.d")]
+		self.settings.language("deu").rows += [
+			Row("set", "github.a.b"),
+			Row("own", "github.a.b", slot="root"),
+		]
+		library.remove_set_rows(self.settings, ["github.a.b"])
+		self.assertEqual(self.settings.language("enu").rows, [Row("set", "github.c.d")])
+		self.assertEqual(self.settings.language("deu").rows, [Row("own", "github.a.b", slot="root")])
+
 	def test_settings_survive_a_save_and_load(self):
 		language = self.settings.language("eng")
 		language.rows += [
@@ -79,6 +100,7 @@ class SettingsTests(LibraryTestCase):
 		]
 		language.dialect = False
 		self.settings.seen_sets.add("github.a.b")
+		self.settings.sources.append("example/Repo")
 		library.save_settings(self.paths, self.settings)
 		self.assertEqual(library.load_settings(self.paths), self.settings)
 

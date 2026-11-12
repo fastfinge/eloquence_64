@@ -42,6 +42,8 @@ UNPARSED_LANGUAGES = frozenset({"chs", "jpn", "kor"})
 # A dialect can also use its main language's dictionaries, with its own stacked on top. For Chinese
 # the American English ones are what the engine reads English words with.
 DIALECT_BASES = {"eng": "enu", "esm": "esp", "frc": "fra", "chs": "enu"}
+# The Dictionary Sources a new installation offers. Nothing is downloaded until the user asks.
+DEFAULT_SOURCES = ("eigencrow/IBMTTSDictionaries", "Mohamed00/AltIBMTTSDictionaries")
 
 _BUILD_RECORD = "build.json"
 _SLOT_IN_NAME = re.compile(r"(main|root|abbr)(?=\.dic$)", re.IGNORECASE)
@@ -109,6 +111,8 @@ class Settings:
 	languages: dict = field(default_factory=dict)
 	# Every set ID ever offered, so a set the user switched off is not switched back on.
 	seen_sets: set = field(default_factory=set)
+	# Dictionary Sources as "owner/name" GitHub repositories, in the order the user listed them.
+	sources: list = field(default_factory=lambda: list(DEFAULT_SOURCES))
 
 	def language(self, code):
 		return self.languages.setdefault(code, LanguageSettings())
@@ -117,12 +121,15 @@ class Settings:
 		return {
 			"version": SETTINGS_VERSION,
 			"seen_sets": sorted(self.seen_sets),
+			"sources": list(self.sources),
 			"languages": {code: asdict(language) for code, language in sorted(self.languages.items())},
 		}
 
 	@classmethod
 	def from_json(cls, data):
 		settings = cls(seen_sets=set(data.get("seen_sets", ())))
+		if "sources" in data:
+			settings.sources = [str(source) for source in data["sources"]]
 		for code, language in data.get("languages", {}).items():
 			settings.languages[code] = LanguageSettings(
 				rows=[Row(**row) for row in language.get("rows", ())],
@@ -175,6 +182,13 @@ def reconcile_sets(settings, sets):
 			settings.seen_sets.add(set_id)
 			changed = True
 	return changed
+
+
+def remove_set_rows(settings, set_ids):
+	"""Drop the rows for sets the user removed, in every language."""
+	set_ids = set(set_ids)
+	for language in settings.languages.values():
+		language.rows[:] = [row for row in language.rows if not (row.kind == "set" and row.id in set_ids)]
 
 
 def guess_slot(filename):
@@ -274,7 +288,7 @@ def build(paths, settings, sets, languages=LANGUAGES):
 	}
 	with open(os.path.join(new_directory, _BUILD_RECORD), "w", encoding="utf-8") as f:
 		json.dump(record, f, indent="\t")
-	_swap_in(new_directory, paths.active)
+	swap_in_directory(new_directory, paths.active)
 	return outcomes
 
 
@@ -372,7 +386,8 @@ def _previous_files(paths, language):
 	return files
 
 
-def _swap_in(new_directory, active_directory):
+def swap_in_directory(new_directory, active_directory):
+	"""Replace active_directory with new_directory, leaving the old one in place if that fails."""
 	old_directory = active_directory + ".old"
 	shutil.rmtree(old_directory, ignore_errors=True)
 	try:
