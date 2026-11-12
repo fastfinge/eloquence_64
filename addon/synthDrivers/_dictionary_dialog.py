@@ -470,6 +470,12 @@ class ManageDictionariesDialog(wx.Dialog):
 	def _message(self, message, title, style=wx.OK | wx.ICON_INFORMATION):
 		return gui.messageBox(message, title, style, self)
 
+	def _announce(self, text):
+		"""Speak and braille a short message without moving focus."""
+		import ui
+
+		ui.message(text)
+
 	def _ask_file(self):
 		with wx.FileDialog(
 			self,
@@ -526,8 +532,15 @@ class ManageDictionariesDialog(wx.Dialog):
 		index = self.stackList.GetSelection()
 		if index == wx.NOT_FOUND:
 			return
-		self._refresh_stack(select=self.manager.move(self.language, index, delta))
+		moved_to = self.manager.move(self.language, index, delta)
+		self._refresh_stack(select=moved_to)
 		self.stackList.SetFocus()
+		if moved_to != index:
+			# The list re-reads the row's name and nothing else, so say where it went.
+			self._announce(
+				# Translators: Spoken after moving a dictionary up or down in the list.
+				_("Position {position} of {count}").format(position=moved_to + 1, count=len(self._rows))
+			)
 
 	def onDialect(self, evt):
 		self.manager.set_uses_dialect_base(self.language, self.dialectCheckBox.GetValue())
@@ -654,11 +667,23 @@ class ManageDictionariesDialog(wx.Dialog):
 		# Translators: Title of the message shown after a dictionary update.
 		title = _("Dictionary Update")
 		if report:
-			# Translators: Part of the message shown after a dictionary update. A list follows.
-			summary.append(_("These entries may not take effect, and these files were rejected:"))
+			rejected = any(
+				file.status is FileStatus.FAILED
+				for result in results or ()
+				for stored in result.sets
+				for file in stored.files
+			)
+			if rejected:
+				# Translators: Part of the message shown after a dictionary update. A list follows.
+				summary.append(_("These files were rejected, and these entries may not take effect:"))
+			else:
+				# Translators: Part of the message shown after a dictionary update. A list follows.
+				summary.append(_("These entries may not take effect:"))
 			self._confirm_report(title, "\n".join(summary), report, ask=False)
 		else:
 			self._message("\n".join(summary), title)
+		# Back to the list the result was about, which is where the next step is.
+		self.stackList.SetFocus()
 
 	def onUpdateError(self, error):
 		self._message(

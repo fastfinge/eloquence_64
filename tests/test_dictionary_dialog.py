@@ -246,8 +246,17 @@ class StackTests(DialogTestCase):
 		self.assertFalse(os.path.exists(self.paths.settings_file))
 		self.assertEqual(self.applied, [])
 
+	def test_moving_a_row_says_where_it_went(self):
+		# Heard in NVDA: after a move the list repeats the row's name and gives no position.
+		dialog = self.open()
+		self.select(dialog, 0)
+		with mock.patch.object(dialog, "_announce") as announce:
+			self.press(dialog.moveDownButton)
+		announce.assert_called_once_with("Position 2 of 2")
+
 	def test_moving_a_row_keeps_it_selected_and_checked(self):
 		dialog = self.open()
+		dialog._announce = lambda text: None
 		self.toggle(dialog, 0)
 		self.select(dialog, 0)
 		self.assertFalse(dialog.moveUpButton.IsEnabled())
@@ -440,6 +449,19 @@ class SourceTests(DialogTestCase):
 		self.assertIn("example/Missing: could not be updated. HTTP Error 404: Not Found", message)
 		self.assertIn("Downloading does not switch anything on.", message)
 
+	def test_an_update_with_no_rejected_file_does_not_mention_rejections(self):
+		# Heard in NVDA: the result said files were rejected when none had been.
+		dialog = self.open()
+		parsed = library.check_file(_lines("IDK\tI don't know"), "enu", "abbr")
+		files = (DownloadedFile("enuabbr.dic", FileStatus.UPDATED, reports=parsed.reports),)
+		results = (SourceResult("example/Repo", (DownloadedSet("github.example.repo", "Repo", files),)),)
+		shown = []
+		with mock.patch.object(dialog, "_confirm_report", side_effect=lambda *args, **kw: shown.append(args)):
+			dialog.onUpdated(results, False)
+		message = shown[0][1]
+		self.assertIn("These entries may not take effect:", message)
+		self.assertNotIn("rejected", message)
+
 	def test_an_update_with_entries_to_review_puts_them_in_the_report_field(self):
 		dialog = self.open()
 		parsed = library.check_file(_lines("IDK\tI don't know"), "enu", "abbr")
@@ -463,8 +485,9 @@ class SourceTests(DialogTestCase):
 			dialog, "_confirm_report", side_effect=lambda *args, **kw: shown.append((args, kw))
 		):
 			dialog.onUpdated(results, False)
-		((_title, _message, lines), keywords) = shown[0]
+		((_title, message, lines), keywords) = shown[0]
 		self.assertFalse(keywords["ask"])
+		self.assertIn("These files were rejected, and these entries may not take effect:", message)
 		self.assertEqual(
 			lines,
 			[
