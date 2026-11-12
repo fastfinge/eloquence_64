@@ -87,6 +87,15 @@ def prepare():
 		log.exception("Could not rebuild the dictionaries; using the ones built before")
 
 
+def apply_changes():
+	"""After the dictionaries dialog saved new selections: rebuild, and reload the synth if speech changes."""
+	try:
+		if refresh():
+			reload_synth()
+	except Exception:
+		log.exception("Could not rebuild the dictionaries after the selections changed")
+
+
 def reload_synth():
 	"""Reload the Synth Driver so the engine reads the rebuilt files. Safe to call from any thread."""
 	import wx

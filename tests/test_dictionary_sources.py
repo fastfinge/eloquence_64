@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 import zipfile
+from unittest import mock
 
 from addon.synthDrivers import _dictionary_sets as sets
 from addon.synthDrivers import _dictionary_update as dictionary_update
@@ -248,6 +249,35 @@ class FailureTests(SourceTestCase):
 			dictionary_update.update_source(
 				"eigencrow/ibmtts-dictionaries", self.sources, base_url="http://127.0.0.1:9"
 			)
+
+	def test_a_stalled_download_times_out_instead_of_hanging(self):
+		release = threading.Event()
+		self.addCleanup(release.set)
+
+		class Stalling(http.server.BaseHTTPRequestHandler):
+			def do_GET(self):
+				self.send_response(200)
+				self.end_headers()
+				self.wfile.write(b"PK")
+				self.wfile.flush()
+				release.wait(30)
+
+			def log_message(self, *args):
+				pass
+
+		server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stalling)
+		server.daemon_threads = True
+		threading.Thread(target=server.serve_forever, daemon=True).start()
+		self.addCleanup(server.server_close)
+		self.addCleanup(server.shutdown)
+		base_url = f"http://127.0.0.1:{server.server_address[1]}"
+		with (
+			mock.patch.object(dictionary_update, "NETWORK_TIMEOUT_SECONDS", 0.2),
+			self.assertRaises(TimeoutError),
+		):
+			dictionary_update.update_source("example/Repo", self.sources, base_url=base_url)
+		release.set()
+		self.assertFalse(os.path.exists(self.sources))
 
 	def test_one_failing_source_does_not_stop_the_others(self):
 		archives = {"example/Missing": 404, "example/Good": _archive({"enuroot.dic": _lines(f"cat\t{CAT}")})}
