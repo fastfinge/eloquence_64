@@ -356,6 +356,38 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 			with self.subTest(text=text):
 				self.assertNotIn(b"`vv", text)
 
+	def _texts_sent(self):
+		outlist, _seq = self.eloquence.synth_queue.get_nowait()
+		for func, args in outlist:
+			func(*args)
+		return [payload["text"] for command, payload in self.backend.commands if command == "addText"]
+
+	def test_preview_honours_dictionary_codes_with_voice_tags_off(self):
+		# Eloquence Dictionary Manager's Play new: a phonetic string must reach
+		# the engine, where speak() would turn its backquote into a space.
+		driver = self._new_driver()
+		driver.previewEciPronunciation("`[.1Ar.0min] `vv10 loud")
+		self.assertEqual(
+			self._texts_sent(),
+			[b"`pp0 `da0 `ts0 `vv92 `[.1Ar.0min]  vv10 loud", b"`p1 "],
+		)
+		self.assertFalse(driver._backquoteVoiceTags)
+
+	def test_preview_turns_spelling_off_before_it_ends(self):
+		driver = self._new_driver()
+		driver.previewEciPronunciation("`ts1 abc")
+		self.assertEqual(
+			self._texts_sent(),
+			[b"`pp0 `da0 `ts0 `vv92 `ts1 abc `ts0", b"`p1 "],
+		)
+
+	def test_speech_after_a_preview_is_built_as_before(self):
+		driver = self._new_driver()
+		driver.previewEciPronunciation("`[.1Ar.0min]")
+		self.eloquence.synth_queue.get_nowait()
+		driver.speak(["`[.1Ar.0min]"])
+		self.assertEqual(self._texts_sent(), [b"`pp0 `da0 `ts0 `vv92  [.1Ar.0min]", b"`p1 "])
+
 	def test_cancelling_advances_the_generation_the_driver_reads(self):
 		before = self.eloquence.current_generation()
 		self.eloquence.stop()

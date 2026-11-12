@@ -23,6 +23,10 @@ NETWORK_TIMEOUT_SECONDS = 30
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 # The Eloquence Engine reads western Pronunciation Dictionaries in the Windows ANSI code page.
 DICTIONARY_ENCODING = "cp1252"
+# The longest translation, in bytes, the proprietary engine loads intact. It cuts 513 to 527 bytes
+# down to 512, refuses the whole file at 528, and from 529 dies inside eciLoadDict, taking the
+# Eloquence Host Process with it.
+MAX_TRANSLATION_BYTES = 512
 
 
 class DictionaryUpdateError(Exception):
@@ -172,6 +176,9 @@ def _merge_file(source_data, dest_path):
 	for key, translation in _parse_entries(_decode(source_data)):
 		key, translation = _to_engine_text(key), _to_engine_text(translation)
 		if key is None or translation is None:
+			continue
+		if len(translation.encode(DICTIONARY_ENCODING)) > MAX_TRANSLATION_BYTES:
+			log.warning(f"Skipped {key} in {filename}: its translation is longer than the engine can load")
 			continue
 		merge_key = _merge_key(key, case_sensitive)
 		if merge_key in seen_keys:

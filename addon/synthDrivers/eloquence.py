@@ -692,17 +692,38 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			volume=self.getVParam(_eloquence.vlm),
 			rate=self.rate,
 			pause_mode=self._pause_mode,
-			backquote_tags=self._backquoteVoiceTags,
+			backquotes=(
+				_eloquence_text.Backquotes.COMMANDS
+				if self._backquoteVoiceTags
+				else _eloquence_text.Backquotes.SPACES
+			),
 			abbreviation_dict=self._ABRDICT,
 			phrase_prediction=self._phrasePrediction,
 		)
 
 	def speak(self, speechSequence):
+		self._speak(speechSequence, self._build_options())
+
+	def previewEciPronunciation(self, text: str) -> None:
+		"""Speak one pronunciation dictionary value once, as the engine would say it.
+
+		The optional preview method of Eloquence Dictionary Manager's directory
+		contract: *text* is a value exactly as it appears after the tab in a
+		dictionary file.  Its phonetic strings, emphasis codes and spelling-mode
+		codes are honoured whatever backquote voice tags says, and every other
+		backquote becomes a space, because any add-on may call this.  Nothing is
+		changed afterwards, and spelling mode is off.
+		"""
+		options = dataclasses.replace(
+			self._build_options(), backquotes=_eloquence_text.Backquotes.DICTIONARY_CODES
+		)
+		self._speak([text], options)
+
+	def _speak(self, speechSequence, options):
 		last = None
 		outlist = []
 		pending_indexes = []
 		queued_speech = False
-		options = self._build_options()
 		# What an in-process engine needs from the Text Builder is per fragment,
 		# because a mixed-language utterance can cross backends mid-sentence and
 		# the openevv bracket workaround may not reach any other engine.  Every
