@@ -41,7 +41,7 @@ within 0.1%.
 
 import unittest
 
-from addon.synthDrivers._eloquence_text import BuildOptions, build
+from addon.synthDrivers._eloquence_text import Backquotes, BuildOptions, build
 from addon.synthDrivers._text_preprocessing import attach_spaced_brackets
 
 ENU = 65536
@@ -52,7 +52,7 @@ def _options(**overrides):
 		volume=92,
 		rate=50,
 		pause_mode=1,
-		backquote_tags=False,
+		backquotes=Backquotes.SPACES,
 		abbreviation_dict=False,
 		phrase_prediction=False,
 		openevv_bracket_fixes=True,
@@ -145,7 +145,7 @@ class BuildIntegrationTests(unittest.TestCase):
 		# In raw voice-tag mode the author is addressing the engine directly and
 		# spacing may be deliberate.
 		built = build(
-			"( hello )", voice_id=ENU, options=_options(backquote_tags=True)
+			"( hello )", voice_id=ENU, options=_options(backquotes=Backquotes.COMMANDS)
 		)
 		self.assertIn(b"( hello )", built)
 

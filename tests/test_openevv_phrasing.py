@@ -63,7 +63,7 @@ class SplitSentenceTests(unittest.TestCase):
 			volume=80,
 			rate=50,
 			pause_mode=0,
-			backquote_tags=False,
+			backquotes=_eloquence_text.Backquotes.SPACES,
 			abbreviation_dict=False,
 			phrase_prediction=False,
 			openevv_bracket_fixes=True,

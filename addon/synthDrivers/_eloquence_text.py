@@ -1,6 +1,7 @@
 """Pure Eloquence Text Builder and Engine Encoding selection."""
 
 from dataclasses import dataclass
+from enum import Enum
 import re
 from types import MappingProxyType
 
@@ -33,6 +34,28 @@ _BREAK_FACTORS = MappingProxyType(
 )
 
 
+# The backquote codes a pronunciation dictionary value may carry, as Eloquence
+# Dictionary Manager's validator defines them: a phonetic string, an emphasis
+# code, or a spelling-mode code.  _keep_dictionary_codes() checks where each may sit.
+_DICTIONARY_CODE = re.compile(r"`(?:(?P<spr>\[)|(?P<emphasis>00|[0-4])(?=\s)|ts(?P<spelling>[0-3])(?!\d))")
+# Spelling mode outlives the utterance that turned it on, on the proprietary
+# engine and openevv alike, so every fragment opens by turning it off.  Every
+# fragment rather than every utterance, because an utterance can cross backends
+# mid-sentence and each engine keeps its own spelling mode.
+SPELLING_RESET = "`ts0 "
+
+
+class Backquotes(Enum):
+	"""What the Eloquence Text Builder does with a backquote in spoken text."""
+
+	SPACES = "spaces"
+	"""Every backquote becomes a space: backquote voice tags are off."""
+	COMMANDS = "commands"
+	"""Every backquote reaches the engine: backquote voice tags are on."""
+	DICTIONARY_CODES = "dictionaryCodes"
+	"""Only the codes a dictionary value may carry reach the engine."""
+
+
 @dataclass(frozen=True)
 class BuildOptions:
 	"""Settings snapshotted for one Eloquence Text Builder invocation."""
@@ -40,7 +63,7 @@ class BuildOptions:
 	volume: int
 	rate: int
 	pause_mode: int
-	backquote_tags: bool
+	backquotes: Backquotes
 	abbreviation_dict: bool
 	phrase_prediction: bool
 	# Set only for the in-process openevv backend, which speaks the *name* of a
@@ -81,6 +104,39 @@ def _insert_pause_commands(text: str, command: str, protect_closing_brackets: bo
 	return pause_re.sub(replace, text)
 
 
+def _keep_dictionary_codes(text: str) -> str:
+	"""Turn every backquote a dictionary value may not carry into a space.
+
+	Eloquence Dictionary Manager's validation rule, applied backquote by
+	backquote instead of rejecting the text: a phonetic string (`[...]) or an
+	emphasis code (`0 to `4, or `00, followed by whitespace) must start the text
+	or follow whitespace.  `ts1 to `ts3 may sit anywhere.  `ts0 must start the
+	text or follow whitespace, because the engines ignore one glued to the word
+	before it.  Text that leaves spelling on gets a `ts0 at its end.
+	"""
+
+	kept = []
+	spelling_on = False
+	start = 0
+	position = text.find("`")
+	while position >= 0:
+		match = _DICTIONARY_CODE.match(text, position)
+		after_space = position == 0 or text[position - 1].isspace()
+		turns_spelling_on = match is not None and match["spelling"] not in (None, "0")
+		if match is not None and (after_space or turns_spelling_on):
+			if match["spelling"] is not None:
+				spelling_on = turns_spelling_on
+		else:
+			kept.append(text[start:position])
+			kept.append(" ")
+			start = position + 1
+		position = text.find("`", position + 1)
+	kept.append(text[start:])
+	if spelling_on:
+		kept.append(" `ts0")
+	return "".join(kept)
+
+
 def _engine_encode(text: str, voice_id) -> bytes:
 	encoding = _ENGINE_ENCODINGS.get(voice_id)
 	if encoding is not None:
@@ -101,20 +157,34 @@ def build(text: str, voice_id: int, options: BuildOptions, opens_utterance: bool
 	break in Say All.  ETI's 6.1 does not.  The volume is the engine's already,
 	through eciSetVoiceParam, so later fragments lose nothing by going without.
 	See tests/test_openevv_phrasing.py.
+
+	Every fragment turns spelling mode off.  A dictionary value that turns it on
+	and never off would otherwise have every later utterance spelled, until the
+	engine restarts.  Unlike `vv, `ts0 does not end openevv's phrase: a sentence
+	split with one in front of its second fragment is byte-identical to the
+	whole sentence, on all three engines.
 	"""
 
 	try:
 		voice_id = int(voice_id)
 	except (TypeError, ValueError):
 		pass
+	if options.backquotes is Backquotes.DICTIONARY_CODES:
+		# Decided on the text as given, as Eloquence Dictionary Manager decides it:
+		# preprocessing maps lookalikes such as a fullwidth ｔｓ１ onto ts1.  And
+		# again below, for any backquote that preprocessing itself produced.
+		text = _keep_dictionary_codes(text)
 	text = _text_preprocessing.preprocess(text, voice_id)
 	# Before any backquote command is added, so the rewrite only ever sees user
-	# text.  Skipped in raw backquote-tag mode, where the author is addressing the
-	# engine directly and spacing may be deliberate.
-	if options.openevv_bracket_fixes and not options.backquote_tags:
+	# text.  Skipped whenever backquotes reach the engine: with voice tags on the
+	# author is addressing the engine directly and spacing may be deliberate, and
+	# a dictionary value is previewed as the engine would expand the entry.
+	if options.openevv_bracket_fixes and options.backquotes is Backquotes.SPACES:
 		text = _text_preprocessing.attach_spaced_brackets(text)
-	if not options.backquote_tags:
+	if options.backquotes is Backquotes.SPACES:
 		text = text.replace("`", " ")
+	elif options.backquotes is Backquotes.DICTIONARY_CODES:
+		text = _keep_dictionary_codes(text)
 	# The Pause Policy reads the character before each mark, and this prefix is
 	# what gives a fragment opening on a mark a space there.  So it stays on
 	# until the policy has run, whichever fragment this is, and only then goes.
@@ -126,6 +196,7 @@ def build(text: str, voice_id: int, options: BuildOptions, opens_utterance: bool
 		text = _insert_pause_commands(text, "`p1", options.openevv_bracket_fixes)
 	if not opens_utterance:
 		text = text[len(volume) :]
+	text = SPELLING_RESET + text
 	text = time_re.sub(r"\1:\2 \3", text)
 	text = f"`da{int(options.abbreviation_dict)} {text}"
 	text = f"`pp{int(options.phrase_prediction)} {text}"
@@ -154,10 +225,17 @@ def break_fragment(time_ms: int, options: BuildOptions) -> bytes:
 
 
 def trailing_pause(last_built: bytes, options: BuildOptions) -> "bytes | None":
-	"""Build the ending fragment required by the active Pause Policy."""
+	"""Build the ending fragment required by the active Pause Policy.
+
+	It opens with a space because ReLoq C joins one eciAddText to the next with
+	nothing between them: without it, a last word "zqkey" was read as
+	"zqkey`p0", so no dictionary entry applied to it, and a phonetic string
+	there ran 6.1 s instead of 0.95 s.  The proprietary engine and openevv treat
+	the call boundary as a separator, and are byte-identical either way.
+	"""
 
 	trimmed = last_built.rstrip()
 	if trimmed and trimmed[-1] in punctuation:
 		return None
 	pause_value = 0 if options.pause_mode == 0 else 1
-	return f"`p{pause_value} ".encode("ascii")
+	return f" `p{pause_value} ".encode("ascii")

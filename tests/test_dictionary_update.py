@@ -96,6 +96,17 @@ class MergeTests(DictionaryUpdateTestCase):
 		])  # fmt: skip
 		self.assertNoTemporaryFiles()
 
+	def test_a_translation_too_long_for_the_engine_is_skipped(self):
+		# From 529 bytes the proprietary engine dies inside eciLoadDict.
+		longest = "x" * 512
+		result = self.update({"enumain.dic": f"long\t{'x' * 529}\nlongest\t{longest}\nNVDA\ten vee dee ay\n"})
+
+		self.assertEqual(
+			self.read_local("enumain.dic"),
+			f"longest\t{longest}\r\nNVDA\ten vee dee ay\r\n".encode("cp1252"),
+		)
+		self.assertEqual(result.entries_added, 2)
+
 	def test_repeated_update_reports_unchanged_and_leaves_files_alone(self):
 		files = {"enumain.dic": "NVDA\ten vee dee ay\n", "enuroot.dic": "roof\t`[rUf]\n"}
 		self.update(files)
