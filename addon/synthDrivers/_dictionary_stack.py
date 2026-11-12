@@ -19,9 +19,9 @@ from . import _dictionary_entries as entries
 MAX_FILE_BYTES = 8 * 1024 * 1024
 
 # Rule breaks that mean an entry cannot be written as one line of a dictionary file.
-_UNWRITABLE = frozenset({"emptyKey", "emptyValue", "keyTab", "valueTab"})
+UNWRITABLE_PROBLEMS = frozenset({"emptyKey", "emptyValue", "keyTab", "valueTab"})
 # Rule breaks that reject the whole file, because it is then not a dictionary for this language.
-_FILE_LEVEL = frozenset({"unencodableCharacter", "keyTooLong", "valueTooLong"})
+FILE_LEVEL_PROBLEMS = frozenset({"unencodableCharacter", "keyTooLong", "valueTooLong"})
 
 # The two datasets EloquenceDictionaryManager registered before the naming rule existed.
 _REGISTERED_SET_IDS = {
@@ -94,7 +94,7 @@ def parse_dictionary(data, language, slot):
 	if b"\x00" in data:
 		raise DictionaryFileError("notText")
 	kept, reports = [], []
-	for number, line in enumerate(re.split(r"\r\n|\r|\n", _decode(data)), 1):
+	for number, line in enumerate(re.split(r"\r\n|\r|\n", decode_dictionary(data)), 1):
 		# The proprietary engine stops reading at a blank line and the others skip it, so dropping
 		# them is the only reading all three agree on.
 		if not line.strip():
@@ -104,9 +104,9 @@ def parse_dictionary(data, language, slot):
 		key, value = (part.strip() for part in line.split("\t", 1))
 		problems = entries.entry_problems(language, slot, key, value)
 		for problem in problems:
-			if problem in _FILE_LEVEL:
+			if problem in FILE_LEVEL_PROBLEMS:
 				raise DictionaryFileError(problem, number)
-		writable = _UNWRITABLE.isdisjoint(problems)
+		writable = UNWRITABLE_PROBLEMS.isdisjoint(problems)
 		warning = entries.entry_warning(language, slot, key, value)
 		if problems or warning:
 			reports.append(EntryReport(number, key, problems, warning, kept=writable))
@@ -115,7 +115,7 @@ def parse_dictionary(data, language, slot):
 	return ParsedDictionary(tuple(kept), tuple(reports))
 
 
-def _decode(data):
+def decode_dictionary(data):
 	"""Decode a dictionary file of unknown encoding.
 
 	Sources publish a mix of UTF-8 and ANSI files. Accented text in cp1252 is almost never valid

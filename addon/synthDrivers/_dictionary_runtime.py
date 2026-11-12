@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 
 POLL_SECONDS = 2.0
 SYNTH_NAME = "eloquence"
+# Where versions before the dictionary library kept Pronunciation Dictionaries: beside the engine.
+OLD_DICTIONARY_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eloquence")
 
 # One build at a time: the watcher, the engine start and the dictionary dialog can all ask for one.
 _build_lock = threading.RLock()
@@ -72,7 +74,9 @@ def refresh(force=False):
 	if is_secure():
 		return False
 	with _build_lock:
-		return library.refresh(paths(), provider_directories(), force=force)
+		return library.refresh(
+			paths(), provider_directories(), force=force, old_dictionary_directory=OLD_DICTIONARY_DIRECTORY
+		)
 
 
 def prepare():

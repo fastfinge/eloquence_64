@@ -214,55 +214,7 @@ class AddonUpdaterInstallTests(unittest.TestCase):
 		self.assertEqual(calls, ["update.nvda-addon"])
 
 
-class InstallTasksTests(unittest.TestCase):
-	def test_on_install_preserves_existing_dic_files_only(self):
-		with tempfile.TemporaryDirectory() as root:
-			installed = os.path.join(root, "Eloquence")
-			pending = os.path.join(root, "Eloquence.pendingInstall")
-			installed_data = os.path.join(installed, "synthDrivers", "eloquence")
-			pending_data = os.path.join(pending, "synthDrivers", "eloquence")
-			os.makedirs(installed_data)
-			os.makedirs(pending_data)
-
-			with open(os.path.join(installed_data, "enumain.dic"), "w", encoding="cp1252") as dictionary:
-				dictionary.write("user dictionary")
-			with open(os.path.join(installed_data, "ECI.INI"), "w", encoding="utf-8") as ini:
-				ini.write("installed ini")
-			with open(os.path.join(installed_data, "ENU.SYN"), "w", encoding="utf-8") as voice:
-				voice.write("installed voice data")
-			with open(os.path.join(pending_data, "enumain.dic"), "w", encoding="cp1252") as dictionary:
-				dictionary.write("packaged dictionary")
-
-			addon = types.SimpleNamespace(path=pending, installPath=installed)
-			addon_handler = types.SimpleNamespace(getCodeAddon=lambda: addon)
-			fake_log = _FakeLog()
-			log_handler = types.SimpleNamespace(log=fake_log)
-
-			with _ModuleStubs(addonHandler=addon_handler, logHandler=log_handler):
-				sys.modules.pop("addon.installTasks", None)
-				install_tasks = importlib.import_module("addon.installTasks")
-				install_tasks.onInstall()
-
-			with open(os.path.join(pending_data, "enumain.dic"), encoding="cp1252") as dictionary:
-				self.assertEqual(dictionary.read(), "user dictionary")
-			self.assertFalse(os.path.exists(os.path.join(pending_data, "ECI.INI")))
-			self.assertFalse(os.path.exists(os.path.join(pending_data, "ENU.SYN")))
-
-	def test_on_install_ignores_first_install_without_existing_addon(self):
-		with tempfile.TemporaryDirectory() as root:
-			pending = os.path.join(root, "Eloquence.pendingInstall")
-			os.makedirs(os.path.join(pending, "synthDrivers", "eloquence"))
-
-			addon = types.SimpleNamespace(path=pending, installPath=os.path.join(root, "Eloquence"))
-			addon_handler = types.SimpleNamespace(getCodeAddon=lambda: addon)
-			log_handler = types.SimpleNamespace(log=_FakeLog())
-
-			with _ModuleStubs(addonHandler=addon_handler, logHandler=log_handler):
-				sys.modules.pop("addon.installTasks", None)
-				install_tasks = importlib.import_module("addon.installTasks")
-				install_tasks.onInstall()
-
-			self.assertEqual(os.listdir(os.path.join(pending, "synthDrivers", "eloquence")), [])
+# The installer's dictionary backup is covered in tests/test_dictionary_migration.py.
 
 
 if __name__ == "__main__":

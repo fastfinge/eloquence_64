@@ -114,6 +114,8 @@ class Settings:
 	seen_sets: set = field(default_factory=set)
 	# Dictionary Sources as "owner/name" GitHub repositories, in the order the user listed them.
 	sources: list = field(default_factory=lambda: list(DEFAULT_SOURCES))
+	# Whether the files an older version of the add-on kept have been taken in; done once.
+	legacy_imported: bool = False
 
 	def language(self, code):
 		"""The settings for a language, to change them."""
@@ -128,6 +130,7 @@ class Settings:
 			"version": SETTINGS_VERSION,
 			"seen_sets": sorted(self.seen_sets),
 			"sources": list(self.sources),
+			"legacy_imported": self.legacy_imported,
 			# A language still at its defaults is left out, so the file says only what was chosen.
 			"languages": {
 				code: asdict(language)
@@ -139,6 +142,7 @@ class Settings:
 	@classmethod
 	def from_json(cls, data):
 		settings = cls(seen_sets=set(data.get("seen_sets", ())))
+		settings.legacy_imported = bool(data.get("legacy_imported", False))
 		if "sources" in data:
 			settings.sources = [str(source) for source in data["sources"]]
 		for code, language in data.get("languages", {}).items():
@@ -175,6 +179,9 @@ def reconcile_sets(settings, sets):
 	that has no set switched on yet; after that its ID is remembered, so switching it off sticks. A
 	set this add-on downloaded is never switched on for the user. Rows for sets that have gone
 	missing are kept, so they resume by themselves if the set returns.
+
+	A new set goes below the user's own files, so what they added themselves keeps winning until
+	they reorder the stack.
 	"""
 	changed = False
 	for set_id, dictionary_set in sorted(sets.items()):
@@ -187,7 +194,10 @@ def reconcile_sets(settings, sets):
 				continue
 			another_is_on = any(row.kind == "set" and row.on for row in language.rows)
 			switch_on = dictionary_set.installed and first_time and not another_is_on
-			language.rows.append(Row("set", set_id, on=switch_on))
+			first_own = next(
+				(index for index, row in enumerate(language.rows) if row.kind == "own"), len(language.rows)
+			)
+			language.rows.insert(first_own, Row("set", set_id, on=switch_on))
 			changed = True
 		if first_time:
 			settings.seen_sets.add(set_id)
@@ -200,6 +210,141 @@ def remove_set_rows(settings, set_ids):
 	set_ids = set(set_ids)
 	for language in settings.languages.values():
 		language.rows[:] = [row for row in language.rows if not (row.kind == "set" and row.id in set_ids)]
+
+
+def import_legacy(paths, settings, old_dictionary_directory=None):
+	"""Take in, once, the dictionary files an older version of the add-on kept. Returns True if it ran.
+
+	Older versions loaded .dic files from the add-on's own folder. The installer copies them to
+	legacy/eloquence in the configuration; if that did not happen and they are still in
+	old_dictionary_directory, they are backed up from there first. Each file then becomes one of the
+	user's own files, marked as imported:
+
+	- A file the old engine was loading is switched on, so speech stays as it was. One it never
+	  loaded, such as main.dic beside enumain.dic, comes in switched off.
+	- A name with no language, main.dic, root.dic or abbr.dic, counts as American English, which
+	  is the only language the old engine loaded it for.
+	- A file whose name says neither language nor slot is left in the backup and not imported.
+
+	The backup itself is never changed: a dictionary editor reads it to recover hand-made entries.
+	"""
+	if settings.legacy_imported:
+		return False
+	if not os.path.isdir(paths.legacy) and old_dictionary_directory:
+		if old_dictionary_directory in _failed_backups:
+			return False
+		try:
+			_back_up_legacy(old_dictionary_directory, paths.legacy)
+		except OSError:
+			# Tried again at the next start, not at every check: once in the log is enough.
+			_failed_backups.add(old_dictionary_directory)
+			log.exception("Could not back up the old dictionary files from %s", old_dictionary_directory)
+			return False
+	settings.legacy_imported = True
+	if not os.path.isdir(paths.legacy):
+		return True
+	names = {name.lower(): name for name in sorted(os.listdir(paths.legacy)) if name.lower().endswith(".dic")}
+	loaded = _files_the_old_engine_loaded(set(names))
+	for lower in sorted(names, key=_legacy_import_order):
+		match = _LEGACY_NAME.fullmatch(lower)
+		language = (match.group(1) or "enu") if match else None
+		if language not in LANGUAGES:
+			log.warning(
+				"Not importing %s: its name does not say which language and slot it is for", names[lower]
+			)
+			continue
+		slot = match.group(2)
+		try:
+			with open(os.path.join(paths.legacy, names[lower]), "rb") as f:
+				data = f.read()
+		except OSError:
+			log.exception("Could not read the old dictionary file %s", names[lower])
+			continue
+		if language not in UNPARSED_LANGUAGES:
+			data, dropped = _salvage(data, language, slot)
+			if dropped:
+				log.warning(
+					"Importing %s without %s line(s) no engine could have used", names[lower], dropped
+				)
+		if data:
+			add_own_file(
+				paths, settings, language, slot, data, names[lower], imported=True, on=lower in loaded
+			)
+	return True
+
+
+_LEGACY_NAME = re.compile(r"([a-z]{3})?(main|root|abbr)\.dic")
+_failed_backups = set()
+
+
+def _legacy_import_order(lower_name):
+	"""The order that makes the imported rows behave as the old engine did with the same files.
+
+	Each file becomes a row, and a later row's root entry removes the word from earlier rows' main.
+	The old engine loaded a language's files together, where main simply beat root. Importing
+	root first and main last keeps it that way. Names with no language go first of all, below
+	enumain.dic and its like, which were the ones found first.
+	"""
+	slot = lower_name[-len("main.dic") :][:4]
+	return (
+		len(lower_name) > len("main.dic"),
+		("root", "abbr", "main").index(slot) if slot in SLOTS else 0,
+		lower_name,
+	)
+
+
+def _back_up_legacy(source_directory, legacy_directory):
+	if not os.path.isdir(source_directory):
+		return
+	names = [name for name in sorted(os.listdir(source_directory)) if name.lower().endswith(".dic")]
+	if not names:
+		return
+	partial = legacy_directory + ".partial"
+	shutil.rmtree(partial, ignore_errors=True)
+	os.makedirs(partial)
+	for name in names:
+		shutil.copy2(os.path.join(source_directory, name), os.path.join(partial, name))
+	os.rename(partial, legacy_directory)
+
+
+def _files_the_old_engine_loaded(names):
+	"""Which of these lower-case file names the old engine would have loaded for some language.
+
+	For each slot it took the first that existed of: the language's own file, its main language's
+	file for a dialect, and for the two Englishes and Chinese the name with no language at all.
+	"""
+	loaded = set()
+	for language in LANGUAGES:
+		codes = [language, *([DIALECT_BASES[language]] if language in DIALECT_BASES else [])]
+		generic = [""] if {"enu", "eng"} & set(codes) else []
+		for slot in SLOTS:
+			for code in codes + generic:
+				if f"{code}{slot}.dic" in names:
+					loaded.add(f"{code}{slot}.dic")
+					break
+	return loaded
+
+
+def _salvage(data, language, slot):
+	"""Return (the lines of an old file that can be loaded, how many lines were dropped).
+
+	An old file may hold what a new one would be rejected for: the old update accepted lines with no
+	tab, and nothing checked encodings or lengths. Rejecting the whole file would take away entries
+	the user has been hearing, so the lines no engine could use are dropped and the rest is kept.
+	"""
+	if b"\x00" in data or len(data) > stack.MAX_FILE_BYTES:
+		return b"", 0
+	kept, dropped = [], 0
+	for line in re.split(r"\r\n|\r|\n", stack.decode_dictionary(data)):
+		if not line.strip():
+			continue
+		key, _, value = (part.strip() for part in line.partition("\t"))
+		problems = set(entries.entry_problems(language, slot, key, value))
+		if problems & (stack.FILE_LEVEL_PROBLEMS | stack.UNWRITABLE_PROBLEMS):
+			dropped += 1
+			continue
+		kept.append(f"{key}\t{value}\r\n")
+	return "".join(kept).encode(entries.WESTERN_ENCODING), dropped
 
 
 def guess_slot(filename):
@@ -419,16 +564,20 @@ def swap_in_directory(new_directory, active_directory):
 	shutil.rmtree(old_directory, ignore_errors=True)
 
 
-def refresh(paths, provider_directories, force=False):
+def refresh(paths, provider_directories, force=False, old_dictionary_directory=None):
 	"""Bring active/ up to date with the selections and the files behind them.
 
 	Finds the available sets, gives new ones their rows, and rebuilds only when something a build
 	reads has changed (or force is set). Returns True when a language's generated files changed,
-	which is when the engine needs to load them again.
+	which is when the engine needs to load them again. old_dictionary_directory is where an older
+	version of the add-on kept its files; see import_legacy().
 	"""
 	found = _dictionary_sets.discover_sets(provider_directories, paths.sources)
 	settings = load_settings(paths)
-	if reconcile_sets(settings, found):
+	# Both must run, so no short-circuit: the old files first, so new sets land below them.
+	imported = import_legacy(paths, settings, old_dictionary_directory)
+	reconciled = reconcile_sets(settings, found)
+	if imported or reconciled:
 		save_settings(paths, settings)
 	if not force and not is_stale(paths, settings, found):
 		return False
