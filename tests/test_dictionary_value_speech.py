@@ -3,8 +3,8 @@
 Spelling mode must not outlive the utterance that turned it on.  A dictionary
 value can turn spelling on with `ts1 to `ts3 and never turn it off, or turn it
 off with a `ts0 glued to the word before it, which the engines ignore.  Every
-later utterance was then spelled out, until NVDA restarted.  So every utterance
-now opens with `ts0, as it opens with `vv for the volume.  Measured 2026-11-12
+later utterance was then spelled out, until NVDA restarted.  So every fragment
+now opens with `ts0, as an utterance opens with `vv for the volume.  Measured 2026-11-12
 at 11025 Hz, a plain sentence spoken after one whose dictionary value is
 `ts1 abc:
 
@@ -15,15 +15,13 @@ at 11025 Hz, a plain sentence spoken after one whose dictionary value is
 
 ReLoq C does not carry spelling over in the first place.  The opening `ts0
 changes nothing else: ordinary speech in every language each engine has was
-byte-identical with and without it, on all three engines.
+byte-identical with and without it, on all three engines, and so was a
+sentence split with one in front of its second fragment.
 
 previewEciPronunciation() speaks a value as Eloquence Dictionary Manager's Play
-new hears it, and that is the entry's own audio, byte for byte, on the
-proprietary engine and openevv.  ReLoq C joins one eciAddText to the next with
-nothing between them, so the trailing pause the driver sends separately is
-glued to the last word: a dictionary word there is not looked up, and a
-phonetic string there runs 6 s instead of 1 s.  That is pinned below as an
-expected failure, so a ReLoq C that fixes it shows up here.
+new hears it, and that is the entry's own audio, byte for byte, on all three
+engines.  On ReLoq C that needs the space that opens the trailing pause (see
+_eloquence_text.trailing_pause()).
 
 Needs the fetched engines: 64-bit Python for openevv and ReLoq C, 32-bit for
 the proprietary engine, which runs from a scratch copy so the repository's
@@ -167,11 +165,6 @@ class ReloqTests(_DictionaryValueSpeech, unittest.TestCase):
 
 	def test_without_the_reset_the_next_utterance_is_spelled(self):
 		self.skipTest("ReLoq C never carried spelling over")
-
-	@unittest.expectedFailure
-	def test_a_preview_is_the_dictionary_entry_s_own_audio(self):
-		# The separately sent trailing pause is glued to the value's last word.
-		super().test_a_preview_is_the_dictionary_entry_s_own_audio()
 
 
 @unittest.skipUnless(

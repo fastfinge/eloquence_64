@@ -369,7 +369,7 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		driver.previewEciPronunciation("`[.1Ar.0min] `vv10 loud")
 		self.assertEqual(
 			self._texts_sent(),
-			[b"`pp0 `da0 `ts0 `vv92 `[.1Ar.0min]  vv10 loud", b"`p1 "],
+			[b"`pp0 `da0 `ts0 `vv92 `[.1Ar.0min]  vv10 loud", b" `p1 "],
 		)
 		self.assertFalse(driver._backquoteVoiceTags)
 
@@ -378,7 +378,7 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		driver.previewEciPronunciation("`ts1 abc")
 		self.assertEqual(
 			self._texts_sent(),
-			[b"`pp0 `da0 `ts0 `vv92 `ts1 abc `ts0", b"`p1 "],
+			[b"`pp0 `da0 `ts0 `vv92 `ts1 abc `ts0", b" `p1 "],
 		)
 
 	def test_speech_after_a_preview_is_built_as_before(self):
@@ -386,7 +386,7 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		driver.previewEciPronunciation("`[.1Ar.0min]")
 		self.eloquence.synth_queue.get_nowait()
 		driver.speak(["`[.1Ar.0min]"])
-		self.assertEqual(self._texts_sent(), [b"`pp0 `da0 `ts0 `vv92  [.1Ar.0min]", b"`p1 "])
+		self.assertEqual(self._texts_sent(), [b"`pp0 `da0 `ts0 `vv92  [.1Ar.0min]", b" `p1 "])
 
 	def test_cancelling_advances_the_generation_the_driver_reads(self):
 		before = self.eloquence.current_generation()

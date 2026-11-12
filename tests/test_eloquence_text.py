@@ -84,6 +84,10 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 			"`l4.0 marker": " l4.0 marker",
 			"`[.1A`vv0r]": "`[.1A vv0r]",
 			"``[.1Ar]": "  [.1Ar]",
+			# Preprocessing maps fullwidth lookalikes onto ASCII.  The rule is
+			# decided on the text as given, and again on what that produced.
+			"`ｔｓ１abc `ts0": " ts1abc `ts0",
+			"｀vv0 marker": " vv0 marker",
 			"plain words": "plain words",
 		}
 		options = self._options(backquotes=_eloquence_text.Backquotes.DICTIONARY_CODES)
@@ -99,7 +103,7 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 		# already has; see Driver.speak() and tests/test_openevv_phrasing.py.
 		self.assertEqual(
 			_eloquence_text.build("Hello", 65536, self._options(), opens_utterance=False),
-			b"`pp0 `da0 Hello",
+			b"`pp0 `da0 `ts0 Hello",
 		)
 
 	def test_a_continuation_opening_on_a_mark_keeps_its_pause_command(self):
@@ -110,7 +114,7 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 			", and then", 65536, self._options(pause_mode=0), opens_utterance=False
 		)
 		self.assertEqual(opening, b"`pp0 `da0 `ts0 `vv80  `p0, and then")
-		self.assertEqual(continuation, b"`pp0 `da0  `p0, and then")
+		self.assertEqual(continuation, b"`pp0 `da0 `ts0  `p0, and then")
 
 	def test_time_fix(self):
 		self.assertEqual(
@@ -139,7 +143,7 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 				)
 
 	def test_trailing_pause_policy(self):
-		for pause_mode, expected in ((0, b"`p0 "), (1, b"`p1 "), (2, b"`p1 ")):
+		for pause_mode, expected in ((0, b" `p0 "), (1, b" `p1 "), (2, b" `p1 ")):
 			with self.subTest(pause_mode=pause_mode):
 				self.assertEqual(
 					_eloquence_text.trailing_pause(b"letter", self._options(pause_mode=pause_mode)),
@@ -161,7 +165,7 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 			with self.subTest(encoding=encoding):
 				self.assertEqual(
 					_eloquence_text.trailing_pause(text.encode(encoding), self._options()),
-					b"`p1 ",
+					b" `p1 ",
 				)
 
 	def test_engine_encoding_by_voice_id(self):
