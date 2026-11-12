@@ -437,6 +437,36 @@ class StalenessTests(LibraryTestCase):
 			f.write(_lines(f"dog\t{DOG}"))
 		self.assertTrue(self._stale())
 
+	def test_building_does_not_change_the_settings(self):
+		# A build that added the languages it asked about would make every later check look stale.
+		before = self.settings.to_json()
+		library.build(self.paths, self.settings, self.sets)
+		self.assertEqual(self.settings.to_json(), before)
+		self.assertEqual(list(self.settings.languages), ["enu"])
+
+	def test_a_refresh_is_fresh_straight_afterwards(self):
+		library.save_settings(self.paths, self.settings)
+		self.assertTrue(library.refresh(self.paths, []))
+		settings = library.load_settings(self.paths)
+		found = sets.discover_sets([], self.paths.sources)
+		self.assertFalse(library.is_stale(self.paths, settings, found))
+		self.assertFalse(library.refresh(self.paths, []))
+
+	def test_a_build_says_which_languages_files_changed(self):
+		self._set("github.c.d", {"deuroot.dic": _lines("hund\thund")})
+		self._switch_on("deu", "github.c.d")
+		first = self._build(("enu", "deu"))
+		self.assertEqual((first["enu"].changed, first["deu"].changed), (True, True))
+		self._personal("deuroot.dic", _lines("katze\tkatze"))
+		second = self._build(("enu", "deu"))
+		self.assertEqual((second["enu"].changed, second["deu"].changed), (False, True))
+
+	def test_switching_the_last_row_off_counts_as_a_change(self):
+		self._build()
+		self.settings.language("enu").rows[0].on = False
+		self.assertTrue(self._build()["enu"].changed)
+		self.assertEqual(self._active_names(), [])
+
 	def test_a_language_that_failed_is_not_rebuilt_over_and_over(self):
 		self._personal("enuroot.dic", _lines("no tab"))
 		with self.assertLogs(library.log, "ERROR"):

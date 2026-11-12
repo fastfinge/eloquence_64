@@ -62,6 +62,7 @@ from synthDriverHandler import (
 	synthIndexReached,
 	synthDoneSpeaking,
 )
+from . import _dictionary_runtime
 from . import _eloquence
 from . import _eloquence_text
 from ._background_work import BackgroundWork
@@ -597,8 +598,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 		try:
 			log.info("Eloquence: Starting initialization")
+			# Before the engine starts, so it loads dictionaries that match the current selections.
+			_dictionary_runtime.prepare()
 			_eloquence.initialize(self._onIndexReached)
 			log.info("Eloquence: _eloquence.initialize completed successfully")
+			try:
+				_dictionary_runtime.start_watching()
+			except Exception:
+				# Without it, dictionary edits apply at the next start instead of straight away.
+				log.exception("Could not start the dictionary watcher")
 		except Exception as e:
 			log.error(f"Eloquence: Failed to initialize _eloquence module: {e}", exc_info=True)
 			raise
@@ -650,6 +658,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			pass  # Never let a notice prevent the synth from working
 
 	def terminate(self):
+		try:
+			_dictionary_runtime.stop_watching()
+		except Exception:
+			log.exception("Could not stop the dictionary watcher")
 		_eloquence.close_audio()
 		# Shut the 32-bit host process down. Without this the host is never asked
 		# to exit, so its onefile bootloader never removes the _MEI directory it

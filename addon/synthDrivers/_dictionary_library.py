@@ -27,6 +27,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field, replace
 
 from . import _dictionary_entries as entries
+from . import _dictionary_sets
 from . import _dictionary_stack as stack
 
 log = logging.getLogger(__name__)
@@ -115,14 +116,24 @@ class Settings:
 	sources: list = field(default_factory=lambda: list(DEFAULT_SOURCES))
 
 	def language(self, code):
+		"""The settings for a language, to change them."""
 		return self.languages.setdefault(code, LanguageSettings())
+
+	def peek(self, code):
+		"""The settings for a language, to read them: asking about a language must not add it."""
+		return self.languages.get(code) or LanguageSettings()
 
 	def to_json(self):
 		return {
 			"version": SETTINGS_VERSION,
 			"seen_sets": sorted(self.seen_sets),
 			"sources": list(self.sources),
-			"languages": {code: asdict(language) for code, language in sorted(self.languages.items())},
+			# A language still at its defaults is left out, so the file says only what was chosen.
+			"languages": {
+				code: asdict(language)
+				for code, language in sorted(self.languages.items())
+				if language != LanguageSettings()
+			},
 		}
 
 	@classmethod
@@ -248,6 +259,8 @@ class LanguageOutcome:
 	error_line: int = 0
 	# {source: number of entries reported as possibly not taking effect}.
 	reported: dict = field(default_factory=dict)
+	# Whether this language's files differ from the ones active/ held before the build.
+	changed: bool = False
 
 
 class _LanguageFailed(Exception):
@@ -271,12 +284,15 @@ def build(paths, settings, sets, languages=LANGUAGES):
 	outcomes, western = {}, {}
 	# Main languages first: a dialect, and Chinese, can borrow what they built.
 	for language in sorted(languages, key=lambda code: code in DIALECT_BASES):
+		previous = _previous_files(paths, language)
 		try:
 			files, reported = _build_language(language, paths, settings, sets, western)
-			outcomes[language] = LanguageOutcome(slots=tuple(files), reported=reported)
+			outcomes[language] = LanguageOutcome(
+				slots=tuple(files), reported=reported, changed=files != previous
+			)
 		except _LanguageFailed as failure:
 			log.error("Keeping the previous dictionaries for %s: %s", language, failure.outcome)
-			files = _previous_files(paths, language)
+			files = previous
 			outcomes[language] = replace(failure.outcome, slots=tuple(files))
 		for slot, data in files.items():
 			with open(os.path.join(new_directory, f"{language}{slot}.dic"), "wb") as f:
@@ -301,7 +317,7 @@ def _build_language(language, paths, settings, sets, western):
 			for slot, path in by_slot.items():
 				files[slot] = _read(path, source, slot)
 		base = DIALECT_BASES.get(language)
-		if base and settings.language(language).dialect:
+		if base and settings.peek(language).dialect:
 			for slot, data in western.get(base, {}).items():
 				files.setdefault(slot, data)
 		return files, {}
@@ -335,17 +351,17 @@ def _layer_files(language, paths, settings, sets):
 	"""
 	base = DIALECT_BASES.get(language)
 	codes = [language]
-	if base and language not in UNPARSED_LANGUAGES and settings.language(language).dialect:
+	if base and language not in UNPARSED_LANGUAGES and settings.peek(language).dialect:
 		codes.insert(0, base)
 	layers = []
 	for code in codes:
-		for row in settings.language(code).rows:
+		for row in settings.peek(code).rows:
 			if row.on:
 				files = _row_files(row, code, paths, sets)
 				if files:
 					layers.append((f"{row.kind}:{row.id}", code, files))
 	for code in codes:
-		if settings.language(code).personal:
+		if settings.peek(code).personal:
 			files = _existing({slot: os.path.join(paths.personal, f"{code}{slot}.dic") for slot in SLOTS})
 			if files:
 				layers.append(("personal", code, files))
@@ -401,6 +417,23 @@ def swap_in_directory(new_directory, active_directory):
 		shutil.rmtree(new_directory, ignore_errors=True)
 		raise
 	shutil.rmtree(old_directory, ignore_errors=True)
+
+
+def refresh(paths, provider_directories, force=False):
+	"""Bring active/ up to date with the selections and the files behind them.
+
+	Finds the available sets, gives new ones their rows, and rebuilds only when something a build
+	reads has changed (or force is set). Returns True when a language's generated files changed,
+	which is when the engine needs to load them again.
+	"""
+	found = _dictionary_sets.discover_sets(provider_directories, paths.sources)
+	settings = load_settings(paths)
+	if reconcile_sets(settings, found):
+		save_settings(paths, settings)
+	if not force and not is_stale(paths, settings, found):
+		return False
+	outcomes = build(paths, settings, found)
+	return any(outcome.changed for outcome in outcomes.values())
 
 
 def fingerprint(paths, settings, sets):
