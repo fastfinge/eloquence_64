@@ -207,12 +207,6 @@ LANGS: Dict[str, int] = {
 	"kor": 655360,  # Korean (0x000A0000)
 }
 LANG_BY_ID: Dict[int, str] = {voice_id: language_code for language_code, voice_id in LANGS.items()}
-DICTIONARY_LANGUAGE_FALLBACKS: Dict[str, tuple] = {
-	"eng": ("enu",),
-	"esm": ("esp",),
-	"frc": ("fra",),
-	"chs": ("enu",),
-}
 
 # Voice parameters re-read from the engine whenever the voice or variant changes.
 _VOICE_PARAMS = (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH)
@@ -239,16 +233,17 @@ def get_short_path(path):
 		return path
 
 
-def get_dictionary_candidates(language_code: str) -> tuple:
-	"""Return main/root/abbreviation dictionary candidates for an Eloquence language."""
+def dictionary_file_names(language_code: str) -> tuple:
+	"""Return the main, root and abbreviation dictionary file names for an Eloquence language.
+
+	One name per slot and nothing else.  The engine used to fall back from a dialect to its main
+	language (British to American English, and so on) and to main.dic with no language at all.  That
+	choice is the user's now: the files in the data directory are generated per language from the
+	selections, a dialect's with its main language's entries already merged in when the user wants
+	them (see _dictionary_library).  A fallback here would put them back after the user said no.
+	"""
 	language_code = (language_code or "enu").lower()
-	language_codes = (language_code, *DICTIONARY_LANGUAGE_FALLBACKS.get(language_code, ()))
-	include_generic = any(code in {"enu", "eng"} for code in language_codes)
-	return (
-		(*(f"{code}main.dic" for code in language_codes), *(("main.dic",) if include_generic else ())),
-		(*(f"{code}root.dic" for code in language_codes), *(("root.dic",) if include_generic else ())),
-		(*(f"{code}abbr.dic" for code in language_codes), *(("abbr.dic",) if include_generic else ())),
-	)
+	return (f"{language_code}main.dic", f"{language_code}root.dic", f"{language_code}abbr.dic")
 
 
 @dataclass
@@ -608,21 +603,23 @@ class EciEngine:
 			# the proprietary engine's 108 ms.
 			return
 		dictionary_dir = get_short_path(self._config.data_directory)
-		dictionary_candidates = get_dictionary_candidates(language_code)
 		self._dictionary_handle = self._dictionary_handles.get(language_code)
 		if self._dictionary_handle is None:
 			self._dictionary_handle = self._dll.eciNewDict(self._handle)
 			self._dictionary_handles[language_code] = self._dictionary_handle
 
 		if language_code not in self._loaded_dictionary_languages:
-			for index, candidates in enumerate(dictionary_candidates):
-				for candidate in candidates:
-					path = os.path.join(dictionary_dir, candidate)
-					if os.path.exists(path):
-						self._dll.eciLoadDict(
-							self._handle, self._dictionary_handle, index, path.encode("mbcs")
-						)
-						break
+			for index, name in enumerate(dictionary_file_names(language_code)):
+				path = os.path.join(dictionary_dir, name)
+				if not os.path.exists(path):
+					continue
+				result = self._dll.eciLoadDict(
+					self._handle, self._dictionary_handle, index, path.encode("mbcs")
+				)
+				# An engine answers 0 for a file it took.  ReLoq C answers 6 for one over 8 MiB,
+				# and then nothing from that file is in force.
+				if result:
+					LOGGER.warning("The engine refused the dictionary %s (code %s)", name, result)
 			self._loaded_dictionary_languages.add(language_code)
 		self._activate_dictionary()
 
