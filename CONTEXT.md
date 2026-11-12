@@ -146,13 +146,37 @@ _Avoid_: sequence, session, request, generation id
 An Eloquence dictionary file loaded by the Eloquence Engine to influence how words, roots, or abbreviations are spoken.
 _Avoid_: dictionary, IBM dictionary, custom dictionary
 
+**Dictionary Slot**:
+One of the three kinds of western Pronunciation Dictionary a language has: main (exact words), root (word roots) and abbr (abbreviations). The engine takes one file per slot.
+_Avoid_: type, volume, dictionary kind
+
+**Managed Dictionary Set**:
+One upstream dataset of Pronunciation Dictionaries with a stable ID, either provided by an installed add-on through the shared directory contract or downloaded by this add-on from a Dictionary Source.
+_Avoid_: dictionary pack, bundle, provider
+
 **Dictionary Source**:
-A remote repository selected by the user as the origin for Pronunciation Dictionary updates.
+A GitHub repository the user has listed for this add-on to download Managed Dictionary Sets from.
 _Avoid_: dictionary, source URL, provider
 
 **Dictionary Update**:
-A user-initiated refresh of local Pronunciation Dictionaries from the selected Dictionary Source.
+A user-initiated download of every listed Dictionary Source, replacing the sets stored from it. It never changes which dictionaries are switched on.
 _Avoid_: update, dictionary source update, merge
+
+**Own Dictionary File**:
+A Pronunciation Dictionary the user added, copied into this add-on's data so the original can be moved or deleted. Files taken over from an older version of the add-on are Own Dictionary Files marked as imported.
+_Avoid_: custom dictionary, user dictionary, local file
+
+**Personal Dictionary Overlay**:
+The user's own entries kept in the shared folder by a dictionary editor add-on. This add-on reads it and never writes it, and it always wins over every other row.
+_Avoid_: personal dictionary, user entries, overrides
+
+**Dictionary Stack**:
+A language's ordered list of rows, each a Managed Dictionary Set or an Own Dictionary File switched on or off, with the Personal Dictionary Overlay last. Where two rows have the same word, the later one wins.
+_Avoid_: dictionary list, priority list, selection
+
+**Active Dictionaries**:
+The files generated from every language's Dictionary Stack, one per language and Dictionary Slot. They are the only Pronunciation Dictionaries the Eloquence Engine loads.
+_Avoid_: merged dictionary, cache, output
 
 **Add-on Update**:
 A user-approved update of the installed Eloquence NVDA Add-on package from a released add-on version.
