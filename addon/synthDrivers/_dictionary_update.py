@@ -477,16 +477,30 @@ def _store_set(archive, members, target, set_id, set_name, repository_url, revis
 	return tuple(outcomes)
 
 
+def set_id_for_source(repository):
+	"""The set ID of a source's top-level files, or None if it cannot be used as a source."""
+	parsed = parse_repository(repository)
+	return stack.set_id_for_repository(*parsed) if parsed else None
+
+
+def source_set_ids(repository, set_ids):
+	"""Which of set_ids came from this source: its top-level set and one per folder inside it."""
+	top_level_id = set_id_for_source(repository)
+	if top_level_id is None:
+		return []
+	# A folder inside the repository is its own set, named <repository ID>..<folder>.
+	return [
+		set_id
+		for set_id in sorted(set_ids)
+		if set_id == top_level_id or set_id.startswith(top_level_id + "..")
+	]
+
+
 def remove_source(repository, sources_directory):
 	"""Delete everything downloaded from a Dictionary Source. Returns the IDs of the sets removed."""
-	parsed = parse_repository(repository)
-	top_level_id = stack.set_id_for_repository(*parsed) if parsed else None
-	if top_level_id is None or not os.path.isdir(sources_directory):
+	if not os.path.isdir(sources_directory):
 		return ()
-	removed = []
-	for name in sorted(os.listdir(sources_directory)):
-		# A folder inside the repository is its own set, named <repository ID>..<folder>.
-		if name == top_level_id or name.startswith(top_level_id + ".."):
-			shutil.rmtree(os.path.join(sources_directory, name), ignore_errors=True)
-			removed.append(name)
+	removed = source_set_ids(repository, os.listdir(sources_directory))
+	for set_id in removed:
+		shutil.rmtree(os.path.join(sources_directory, set_id), ignore_errors=True)
 	return tuple(removed)
