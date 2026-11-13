@@ -56,19 +56,26 @@ class RuntimeTestCase(unittest.TestCase):
 		]
 		self.current_synth = types.SimpleNamespace(name="eloquence")
 		self.set_synth_calls = []
+		# What NVDA was asked to do, in order: cancelling speech and loading a synth.
+		self.nvda_calls = []
 		modules = {
 			"globalVars": types.SimpleNamespace(appArgs=self.app_args),
 			"addonHandler": types.SimpleNamespace(getAvailableAddons=lambda: iter(self.addons)),
 			"wx": types.SimpleNamespace(CallAfter=lambda function, *args: function(*args)),
 			"synthDriverHandler": types.SimpleNamespace(
-				getSynth=lambda: self.current_synth, setSynth=self.set_synth_calls.append
+				getSynth=lambda: self.current_synth, setSynth=self._set_synth
 			),
+			"speech": types.SimpleNamespace(cancelSpeech=lambda: self.nvda_calls.append("cancel speech")),
 		}
 		patcher = mock.patch.dict(sys.modules, modules)
 		patcher.start()
 		self.addCleanup(patcher.stop)
 		self.addCleanup(runtime.stop_watching)
 		self.paths = library.DictionaryPaths(os.path.abspath(self.config))
+
+	def _set_synth(self, name):
+		self.set_synth_calls.append(name)
+		self.nvda_calls.append(f"set synth {name}")
 
 	def active(self, name):
 		with open(os.path.join(self.paths.active, name), "rb") as f:
@@ -136,6 +143,17 @@ class ReloadTests(RuntimeTestCase):
 	def test_the_synth_is_reloaded_when_it_is_the_one_running(self):
 		runtime.reload_synth()
 		self.assertEqual(self.set_synth_calls, ["eloquence"])
+
+	def test_speech_is_cancelled_before_the_synth_is_replaced(self):
+		# Otherwise NVDA's speech manager keeps waiting for indexes from the driver that is gone:
+		# Say All stops, and later speech is queued unheard until a key press cancels it (#177).
+		runtime.reload_synth()
+		self.assertEqual(self.nvda_calls, ["cancel speech", "set synth eloquence"])
+
+	def test_another_synths_speech_is_not_cancelled(self):
+		self.current_synth = types.SimpleNamespace(name="espeak")
+		runtime.reload_synth()
+		self.assertEqual(self.nvda_calls, [])
 
 	def test_another_synth_is_left_alone(self):
 		self.current_synth = types.SimpleNamespace(name="espeak")
