@@ -84,10 +84,31 @@ file are now used, where the engine used to stop reading at the blank line. And
 a dialect now gets its main language's entries as well as its own, where it used
 to get only its own file when it had one.
 
+### Going back to an older version
+
+You can install an older version over this one. Updates still carry the old
+dictionary files along inside the add-on, where this version ignores them, so the
+older version finds the files it had before you updated. It knows nothing about
+the dialog, so changes you made there are not in those files.
+
+Your choices in the dialog and the files they use stay in your NVDA configuration
+folder, and apply again when you update. If you changed dictionaries in the older
+version, the next update backs up its files to `eloquenceDictionaries\legacy` and
+adds them to the dialog as imported files, below the earlier ones, so what you had
+in the older version wins. Switch off any rows you no longer want.
+
+### Where it is stored
+
 Everything is stored in your NVDA configuration folder, in `eloquenceDictionaries`
 and `eciDictionaries`, so it survives add-on updates. To use dictionaries on the
 logon screen, copy your settings to it as usual with NVDA's **Use currently saved
 settings during sign-in** button.
+
+Your choices are saved in `eloquenceDictionaries\dictionaries.json`. If that file
+cannot be read, Eloquence keeps the dictionaries it built last, never saves over
+the file, and says why in the NVDA log. A damaged file is copied to
+`dictionaries.unreadable.json` beside it. The dialog will not open until the file
+can be read again.
 
 ## Traditional Chinese Script Conversion
 
