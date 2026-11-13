@@ -176,7 +176,7 @@ The Synth Driver reloads itself (`synthDriverHandler.setSynth`) when a rebuild c
 
 openevv never matches a root key with an accented letter (Mudb0y/openevv#59). That is upstream's to fix and is deliberately not worked around here: adding unaccented copies would change how those spellings are read on the other two engines.
 
-Testing: `tests/test_dictionary_dialog.py` builds the real dialog with wxPython and NVDA's own `guiHelper`, and skips unless `NVDA_SOURCE` names NVDA's `source` folder. `tests/test_addon_source_checks.py` checks every `wx.NAME` against real wxPython and every used module against the file's imports.
+Testing: `tests/test_dictionary_dialog.py` builds the real dialog with wxPython and NVDA's own `guiHelper`, and skips unless `NVDA_SOURCE` names NVDA's `source` folder. `tests/test_dictionary_dialog_keyboard.py` shows it on a Win32 desktop of its own, which is never switched to, and presses Tab and Alt+letter there for real; a hidden control keeps its access key, so the dialog clears a label it hides. `tests/test_addon_source_checks.py` checks every `wx.NAME` against real wxPython and every used module against the file's imports.
 
 ### Critical Implementation Details
 

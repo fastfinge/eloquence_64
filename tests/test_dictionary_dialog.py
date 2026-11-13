@@ -39,6 +39,45 @@ def _lines(*lines):
 	return ("\r\n".join(lines) + "\r\n").encode("cp1252")
 
 
+def nvda_gui_modules(message_box):
+	"""The modules the dialog imports from NVDA: its own guiHelper, and stand-ins for the rest."""
+	spec = importlib.util.spec_from_file_location("gui.guiHelper", _GUI_HELPER)
+	gui_helper = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(gui_helper)
+	gui = types.ModuleType("gui")
+	gui.__path__ = []
+	gui.guiHelper = gui_helper
+	gui.messageBox = message_box
+	return {
+		"wx": wx,
+		"gui": gui,
+		"gui.guiHelper": gui_helper,
+		"addonHandler": types.SimpleNamespace(initTranslation=lambda: None),
+	}
+
+
+def controls(window):
+	"""Every window inside this one, group boxes' children included, in the order they were created."""
+	for child in window.GetChildren():
+		yield child
+		yield from controls(child)
+
+
+def access_key(control):
+	"""The lowercase letter a control's label marks with &, or None."""
+	if not isinstance(control, (wx.StaticText, wx.Button, wx.CheckBox, wx.StaticBox)):
+		return None  # A field's or a list's GetLabel() is its contents.
+	label = control.GetLabel().replace("&&", "")
+	return label[label.index("&") + 1].lower() if "&" in label else None
+
+
+def fail_build(paths, *languages):
+	"""Give these languages a personal dictionary that cannot be built, and build."""
+	for code in languages:
+		_write(os.path.join(paths.personal, f"{code}root.dic"), _lines("fine\tfine", "no tab here"))
+	library.refresh(paths, [])
+
+
 def _write(path, data):
 	os.makedirs(os.path.dirname(path), exist_ok=True)
 	with open(path, "wb") as f:
@@ -51,25 +90,15 @@ class DialogTestCase(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):
 		cls.app = wx.App(False)
-		spec = importlib.util.spec_from_file_location("gui.guiHelper", _GUI_HELPER)
-		gui_helper = importlib.util.module_from_spec(spec)
-		spec.loader.exec_module(gui_helper)
 		cls.messages = []
-		gui = types.ModuleType("gui")
-		gui.__path__ = []
-		gui.guiHelper = gui_helper
-		gui.messageBox = lambda message, title, style=0, parent=None: cls.messages.append((message, title))
 		cls._had_translation = hasattr(builtins, "_")
 		if not cls._had_translation:
 			builtins._ = lambda text: text
 		cls._modules = mock.patch.dict(
 			sys.modules,
-			{
-				"wx": wx,
-				"gui": gui,
-				"gui.guiHelper": gui_helper,
-				"addonHandler": types.SimpleNamespace(initTranslation=lambda: None),
-			},
+			nvda_gui_modules(
+				lambda message, title, style=0, parent=None: cls.messages.append((message, title))
+			),
 		)
 		cls._modules.start()
 		sys.modules.pop("addon.synthDrivers._dictionary_dialog", None)
@@ -155,18 +184,13 @@ class LayoutTests(DialogTestCase):
 		self.assertEqual(dialog.languageChoice.GetCount(), 13)
 
 	def test_the_tab_order_follows_the_design(self):
-		# Controls are tabbed through in the order they were created.
+		# Controls are tabbed through in the order they were created. test_dictionary_dialog_keyboard
+		# presses Tab for real.
 		dialog = self.open("eng")
-		children = []
-
-		def walk(window):
-			for child in window.GetChildren():
-				children.append(child)
-				walk(child)
-
-		walk(dialog)
+		children = list(controls(dialog))
 		expected = [
 			dialog.languageChoice,
+			dialog.problemField,
 			dialog.stackList,
 			dialog.moveUpButton,
 			dialog.moveDownButton,
@@ -174,7 +198,6 @@ class LayoutTests(DialogTestCase):
 			dialog.removeButton,
 			dialog.openFolderButton,
 			dialog.dialectCheckBox,
-			dialog.problemField,
 			dialog.sourcesList,
 			dialog.addSourceButton,
 			dialog.removeSourceButton,
@@ -185,15 +208,24 @@ class LayoutTests(DialogTestCase):
 		positions = [children.index(control) for control in expected]
 		self.assertEqual(positions, sorted(positions))
 
-	def test_every_access_key_is_used_once(self):
-		dialog = self.open("eng")
-		keys = {}
-		for control in dialog.GetChildren():
-			label = control.GetLabel() if control.IsShown() else ""
-			if "&" in label.replace("&&", ""):
-				key = label[label.replace("&&", "__").index("&") + 1].lower()
-				keys.setdefault(key, []).append(label)
-		clashes = {key: labels for key, labels in keys.items() if len(labels) > 1}
+	def test_every_access_key_is_used_once_in_every_language(self):
+		# Every language with its problem field showing, so that label's key is counted too. Chinese,
+		# Japanese and Korean files are not parsed, so no file content can make them fail.
+		problem = {"error": "noTab", "error_source": "personal", "error_line": 2}
+		self.enterContext(
+			mock.patch.object(manager_module.DictionaryManager, "build_error", return_value=problem)
+		)
+		dialog = self.open()
+		clashes = {}
+		for code in library.LANGUAGES:
+			self.choose_language(dialog, code)
+			self.assertTrue(dialog.problemField.IsShown(), code)
+			keys = {}
+			for control in controls(dialog):
+				key = access_key(control) if control.IsShown() else None
+				if key:
+					keys.setdefault(key, []).append(control.GetLabel())
+			clashes.update({f"{code} Alt+{key}": labels for key, labels in keys.items() if len(labels) > 1})
 		self.assertEqual(clashes, {})
 
 	def test_the_dialect_checkbox_is_only_there_for_a_dialect(self):
@@ -202,7 +234,7 @@ class LayoutTests(DialogTestCase):
 		for code, label in (
 			("eng", "Also use &American English dictionaries"),
 			("esm", "Also use C&astilian Spanish dictionaries"),
-			("frc", "Also use &French dictionaries"),
+			("frc", "&Also use French dictionaries"),
 			("chs", "Also use &American English dictionaries for English words"),
 		):
 			with self.subTest(code=code):
@@ -214,9 +246,8 @@ class LayoutTests(DialogTestCase):
 		self.assertFalse(dialog.dialectCheckBox.IsShown())
 
 	def test_the_problem_field_only_shows_when_a_language_could_not_be_built(self):
-		_write(os.path.join(self.paths.personal, "enuroot.dic"), _lines("fine\tfine", "no tab here"))
 		with self.assertLogs(library.log, "ERROR"):
-			library.refresh(self.paths, [])
+			fail_build(self.paths, "enu", "frc")
 		dialog = self.open("enu")
 		self.assertTrue(dialog.problemField.IsShown())
 		self.assertEqual(
@@ -224,10 +255,36 @@ class LayoutTests(DialogTestCase):
 			"The dictionaries from before are still in use. Personal entries from a dictionary editor, "
 			"line 2: the line has no tab between the word and its pronunciation.",
 		)
-		self.assertIn("Problem", dialog._problemLabel.GetLabel())
+		self.assertEqual(dialog._problemLabel.GetLabel(), "&Problem with this language:")
 		self.choose_language(dialog, "deu")
 		self.assertFalse(dialog.problemField.IsShown())
 		self.assertFalse(dialog._problemLabel.IsShown())
+
+	def test_the_problem_can_be_reached_and_copied_from_the_keyboard(self):
+		# wx leaves a single-line read-only field out of the Tab order, and Alt+P with it.
+		with self.assertLogs(library.log, "ERROR"):
+			fail_build(self.paths, "enu", "frc")
+		dialog = self.open("enu")
+		field = dialog.problemField
+		self.assertTrue(field.IsMultiLine())
+		self.assertFalse(field.IsEditable())
+		self.assertTrue(field.CanAcceptFocusFromKeyboard())
+		# Windows names a field, and sends its label's access key on to it, from the label just before.
+		self.assertIs(field.GetPrevSibling(), dialog._problemLabel)
+		self.choose_language(dialog, "deu")
+		self.assertFalse(field.CanAcceptFocusFromKeyboard())
+
+	def test_a_language_that_could_not_be_built_says_so_where_it_is_chosen(self):
+		with self.assertLogs(library.log, "ERROR"):
+			fail_build(self.paths, "enu", "frc")
+		dialog = self.open("enu")
+		self.assertEqual(dialog.languageChoice.GetStringSelection(), "American English, has a problem")
+		self.choose_language(dialog, "deu")
+		self.assertEqual(dialog.languageChoice.GetStringSelection(), "German")
+		self.assertEqual(
+			dialog.languageChoice.GetString(list(library.LANGUAGES).index("frc")),
+			"Canadian French, has a problem",
+		)
 
 
 class StackTests(DialogTestCase):
