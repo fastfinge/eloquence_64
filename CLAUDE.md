@@ -145,6 +145,7 @@ Layout, all under NVDA's configuration so it survives add-on updates and reaches
 
 - `eciDictionaries/personal/` — the Personal Dictionary Overlay, written by a dictionary editor. Read, never written.
 - `eciDictionaries/legacy/eloquence/` — the files an older version kept in the add-on folder, written once by `installTasks.py`.
+- `eloquenceDictionaries/legacy/<n>/` — later backups of old files the first backup does not hold, made by going back to an older version and updating again. Each is imported once, then marked with `.imported`.
 - `eloquenceDictionaries/sources/<set-id>/` — downloaded Dictionary Sources, in the contract's set layout.
 - `eloquenceDictionaries/own/` — copies of Own Dictionary Files.
 - `eloquenceDictionaries/active/` — the Active Dictionaries, plus `build.json`.
@@ -171,6 +172,8 @@ Rules that are easy to break, each measured on the proprietary engine, openevv a
 - **A build must not change the settings.** `Settings.peek()` reads a language without adding it; `language()` is for editing. A build that added languages made every later staleness check rebuild.
 - **A language that cannot be built keeps its last good files**, and the others are still rebuilt.
 - **`onUninstall` must never delete either configuration folder**: NVDA runs the outgoing version's `onUninstall` on every add-on update.
+- **A `dictionaries.json` that is there but cannot be read is never treated as the defaults.** `load_settings()` raises `SettingsUnreadable`, and `refresh()` then saves and builds nothing. Every read and write of it holds `_settings_lock`, because on Windows the dialog's save and the watcher's read fail each other, and both retry a sharing violation for half a second for other programs.
+- **The installer still carries old `.dic` files into the new add-on folder**, which nothing loads, so going back to an older version finds them. The synth backs up from there only content no backup already holds.
 
 The Synth Driver reloads itself (`synthDriverHandler.setSynth`) when a rebuild changed a generated file, and only then. A rebuild that produces identical files reloads nothing.
 

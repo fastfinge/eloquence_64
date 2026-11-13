@@ -10,6 +10,7 @@ Everything the dialog shows comes from here as plain data, so this module needs 
 NVDA and the dialog itself stays a thin layer of controls.
 """
 
+import copy
 import os
 from dataclasses import dataclass
 
@@ -43,8 +44,9 @@ class DictionaryManager:
 	def __init__(self, paths, provider_directories):
 		self.paths = paths
 		self._provider_directories = list(provider_directories)
+		# Raises library.SettingsUnreadable rather than open on defaults that OK would save.
 		self._saved = library.load_settings(paths)
-		self.settings = library.load_settings(paths)
+		self.settings = copy.deepcopy(self._saved)
 		self._own_added = []
 		self._own_removed = []
 		self._sources_removed = []
@@ -236,7 +238,7 @@ class DictionaryManager:
 		for repository in self._sources_removed:
 			_dictionary_update.remove_source(repository, self.paths.sources)
 		self._own_added, self._own_removed, self._sources_removed = [], [], []
-		self._saved = library.load_settings(self.paths)
+		self._saved = copy.deepcopy(self.settings)
 
 	def cancel(self):
 		"""Drop the working copy, and take back the files and downloads made for it."""
@@ -247,7 +249,7 @@ class DictionaryManager:
 			if repository.lower() not in saved:
 				_dictionary_update.remove_source(repository, self.paths.sources)
 		self._own_added, self._own_removed, self._sources_removed = [], [], []
-		self.settings = library.load_settings(self.paths)
+		self.settings = copy.deepcopy(self._saved)
 		self.refresh_sets()
 
 	def _delete_own(self, name):
