@@ -62,6 +62,7 @@ from synthDriverHandler import (
 	synthIndexReached,
 	synthDoneSpeaking,
 )
+from . import _dictionary_runtime
 from . import _eloquence
 from . import _eloquence_text
 from ._background_work import BackgroundWork
@@ -163,27 +164,16 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 				)
 			)
 
-			self.dictionarySources = {
-				"https://github.com/mohamed00/AltIBMTTSDictionaries": "Alternative IBM TTS Dictionaries",
-				"https://github.com/eigencrow/IBMTTSDictionaries": "IBM TTS Dictionaries",
-			}
-
-			self.dictionaryChoice = sHelper.addLabeledControl(
-				# Translators: Label of a combobox in the Eloquence category of the settings dialog
-				_("Dictionary:"),
-				wx.Choice,
-				choices=list(self.dictionarySources.values()),
+			# Straight after the engine choice, so it comes early when tabbing through the panel.
+			self.manageDictionariesButton = sHelper.addItem(
+				# Translators: Label of a button in the Eloquence category of the settings dialog. It opens
+				# the dialog for choosing which pronunciation dictionaries each language uses.
+				wx.Button(self, label=_("Manage &dictionaries..."))
 			)
-			self.dictionaryChoice.SetStringSelection(
-				config.conf.get("eloquence", {}).get("dictionary_name", "Alternative IBM TTS Dictionaries")
-			)
-
-			# Translators: Button that downloads and applies updates to the selected Eloquence dictionaries.
-			self.updateButton = sHelper.addItem(wx.Button(self, label=_("Update Dictionaries")))
-			self.Bind(wx.EVT_BUTTON, self.onUpdate, self.updateButton)
+			self.Bind(wx.EVT_BUTTON, self.onManageDictionaries, self.manageDictionariesButton)
 			# When NVDA is running in secure mode, one should not be able to save any setting to disk.
 			if globalVars.appArgs.secure:
-				self.updateButton.Disable()
+				self.manageDictionariesButton.Disable()
 
 			# Tool to automate copying eloquence_host32.exe for 64-bit NVDA secure screens
 			self.copyHelperButton = sHelper.addItem(
@@ -415,106 +405,33 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 			config.conf["eloquence"] = {}
 		engine = self.directEngines[self.directEngineChoice.GetSelection()]
 		config.conf["eloquence"]["direct_engine"] = engine or "none"
-		selection = self.dictionaryChoice.GetStringSelection()
-		for url, name in self.dictionarySources.items():
-			if name == selection:
-				config.conf["eloquence"]["dictionary_name"] = name
-				config.conf["eloquence"]["dictionary_url"] = url
-				break
 
-	def onUpdate(self, evt):
-		from . import _dictionary_update
+	def onManageDictionaries(self, evt):
+		"""Open the dictionaries dialog on the language the synth is set to."""
+		from . import _dictionary_dialog, _dictionary_manager
 
-		self.onSave()
-		dictionary_url = config.conf.get("eloquence", {}).get("dictionary_url")
-		if not dictionary_url:
+		try:
+			manager = _dictionary_manager.DictionaryManager(
+				_dictionary_runtime.paths(), _dictionary_runtime.provider_directories()
+			)
+			language = config.conf.get("speech", {}).get("eci", {}).get("voice", "enu")
+			dialog = _dictionary_dialog.ManageDictionariesDialog(
+				self, manager, language, on_applied=_dictionary_runtime.apply_changes
+			)
+		except Exception as e:
+			log.error("Could not open the Eloquence dictionaries dialog", exc_info=True)
 			wx.MessageBox(
-				# Translators: Text of a message dialog when updating a dictionary
-				_("Please select a dictionary first."),
-				# Translators: Title of a message dialog when updating a dictionary
+				# Translators: Text of a message dialog when the dictionaries dialog cannot be opened
+				_("The dictionaries dialog could not be opened: {e}").format(e=e),
+				# Translators: Title of a message dialog when the dictionaries dialog cannot be opened
 				_("Error"),
 				wx.OK | wx.ICON_ERROR,
 			)
 			return
-
-		dictionary_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "eloquence")
-		stage_messages = {
-			# Translators: Message of a progress dialog when updating a dictionary
-			_dictionary_update.UpdateStage.DOWNLOADING: _("Downloading dictionaries..."),
-			# Translators: Message of a progress dialog when updating a dictionary
-			_dictionary_update.UpdateStage.MERGING: _("Merging dictionaries..."),
-		}
-
-		BackgroundWork(
-			self,
-			# Translators: Title of a progress dialog when updating a dictionary
-			_("Updating Dictionaries"),
-			stage_messages[_dictionary_update.UpdateStage.DOWNLOADING],
-			lambda is_cancelled, report: _dictionary_update.update_dictionaries(
-				dictionary_url,
-				dictionary_dir,
-				is_cancelled,
-				lambda stage: report(None, stage_messages[stage]),
-			),
-			self._reportDictionaryUpdate,
-			self._reportDictionaryUpdateError,
-		)
-
-	def _reportDictionaryUpdate(self, result, cancelled):
-		# result.cancelled says whether the update itself stopped early; a late Cancel press changed nothing.
-		paragraphs = []
-		if result.changed:
-			paragraphs.append(
-				# Translators: Part of the message shown after a dictionary update
-				_("Entries added: {entries}\nDictionary files changed: {files}").format(
-					entries=result.entries_added, files=len(result.changed)
-				)
-			)
-			# Translators: Part of the message shown after a dictionary update
-			paragraphs.append(_("The new entries take effect the next time Eloquence starts."))
-		if result.failed:
-			paragraphs.append(
-				# Translators: Part of the message shown after a dictionary update. A list of files follows.
-				_("These dictionary files could not be updated:")
-				+ "".join(f"\n{outcome.filename}: {outcome.error}" for outcome in result.failed)
-			)
-
-		if result.cancelled:
-			# Translators: Part of the message shown after a dictionary update
-			summary = _("Dictionary update cancelled.")
-			# Translators: Title of a message dialog when updating a dictionary
-			title, icon = _("Cancelled"), wx.ICON_INFORMATION
-		elif result.failed and not result.changed:
-			# Translators: Part of the message shown after a dictionary update
-			summary = _("Dictionary update failed.")
-			# Translators: Title of a message dialog when updating a dictionary
-			title, icon = _("Error"), wx.ICON_ERROR
-		elif result.failed:
-			# Translators: Part of the message shown after a dictionary update
-			summary = _("Dictionary update finished, but some files failed.")
-			# Translators: Title of a message dialog when updating a dictionary
-			title, icon = _("Eloquence"), wx.ICON_WARNING
-		elif result.changed:
-			# Translators: Part of the message shown after a dictionary update
-			summary = _("Dictionary update successful!")
-			# Translators: Title of a message dialog when updating a dictionary
-			title, icon = _("Success"), wx.ICON_INFORMATION
-		else:
-			# Translators: Text of a message dialog when updating a dictionary
-			summary = _("No new updates found. Your dictionaries are already up to date.")
-			# Translators: Title of a message dialog when updating a dictionary
-			title, icon = _("Eloquence"), wx.ICON_INFORMATION
-		wx.MessageBox("\n\n".join([summary, *paragraphs]), title, wx.OK | icon)
-
-	def _reportDictionaryUpdateError(self, e):
-		log.error(f"Dictionary update failed: {e}")
-		wx.MessageBox(
-			# Translators: Text of a message dialog when updating a dictionary
-			_("An error occurred while updating the dictionary: {e}").format(e=e),
-			# Translators: Title of a message dialog when updating a dictionary
-			_("Error"),
-			wx.OK | wx.ICON_ERROR,
-		)
+		try:
+			dialog.ShowModal()
+		finally:
+			dialog.Destroy()
 
 
 class SynthDriver(synthDriverHandler.SynthDriver):
@@ -597,8 +514,15 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 		try:
 			log.info("Eloquence: Starting initialization")
+			# Before the engine starts, so it loads dictionaries that match the current selections.
+			_dictionary_runtime.prepare()
 			_eloquence.initialize(self._onIndexReached)
 			log.info("Eloquence: _eloquence.initialize completed successfully")
+			try:
+				_dictionary_runtime.start_watching()
+			except Exception:
+				# Without it, dictionary edits apply at the next start instead of straight away.
+				log.exception("Could not start the dictionary watcher")
 		except Exception as e:
 			log.error(f"Eloquence: Failed to initialize _eloquence module: {e}", exc_info=True)
 			raise
@@ -650,6 +574,10 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			pass  # Never let a notice prevent the synth from working
 
 	def terminate(self):
+		try:
+			_dictionary_runtime.stop_watching()
+		except Exception:
+			log.exception("Could not stop the dictionary watcher")
 		_eloquence.close_audio()
 		# Shut the 32-bit host process down. Without this the host is never asked
 		# to exit, so its onefile bootloader never removes the _MEI directory it

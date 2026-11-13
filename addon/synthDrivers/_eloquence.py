@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from . import _contours
+from . import _dictionary_runtime
 from . import _eci_engine as _engine
 from . import _eloquence_ipc as _ipc
 from . import _eloquence_job as _job
@@ -1111,8 +1112,9 @@ def _direct_initialize_payload(payload: Dict[str, Any], engine: Optional[str] = 
 	standard ECI calls as openevv.
 
 	``dataDirectory`` is passed through unchanged, and deliberately so.  It points
-	at the proprietary engine's directory, where the .dic files live, which is
-	where both backends read them from regardless of which library is loaded.
+	at the generated dictionary files in NVDA's configuration (see
+	_dictionary_library), which is where both backends read them from regardless
+	of which library is loaded.
 	openevv v0.3 could not use them -- see _load_dictionaries() -- but the build
 	no longer ships v0.3.  ReLoq C 1.1.1 loads the same files through the same
 	eciNewDict/eciLoadDict calls, with the same effect as its own
@@ -1301,7 +1303,8 @@ def initialize(indexCallback=None):
 	_pipeline.initialize_audio(_requested_sample_rate)
 	payload = {
 		"eciPath": eci_path,
-		"dataDirectory": os.path.join(os.path.dirname(eci_path)),
+		# The generated dictionary files, the only ones either backend loads.
+		"dataDirectory": _dictionary_runtime.active_directory(),
 		"language": voice_conf.get("voice", "enu"),
 		"enableAbbreviationDict": config.conf.get("speech", {}).get("eci", {}).get("ABRDICT", False),
 		"enablePhrasePrediction": config.conf.get("speech", {}).get("eci", {}).get("phrasePrediction", False),

@@ -20,6 +20,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _REPO_ROOT = Path(__file__).parents[1]
 
@@ -364,6 +365,63 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 	def test_pause_reaches_the_shared_pipeline(self):
 		self.eloquence._pipeline.player = _FakePlayer()
 		self.eloquence.pause(True)  # must not raise
+
+	def _construct(self, calls, **failing):
+		"""Run the real SynthDriver.__init__ with the engine start and the dictionary steps recorded."""
+		runtime = self.driver_module._dictionary_runtime
+
+		def step(name):
+			def record(*args):
+				calls.append(name)
+				if name in failing:
+					raise failing[name]
+
+			return record
+
+		with (
+			mock.patch.object(runtime, "prepare", step("prepare")),
+			mock.patch.object(self.eloquence, "initialize", step("initialize")),
+			mock.patch.object(runtime, "start_watching", step("watch")),
+		):
+			return self.driver_module.SynthDriver()
+
+	def test_dictionaries_are_made_current_before_the_engine_starts_and_watched_after(self):
+		calls = []
+		self._construct(calls)
+		self.assertEqual(calls, ["prepare", "initialize", "watch"])
+
+	def test_a_watcher_that_cannot_start_does_not_stop_the_synth_loading(self):
+		calls = []
+		with self.assertLogs(self.driver_module.log, "ERROR"):
+			driver = self._construct(calls, watch=RuntimeError("no threads today"))
+		self.assertEqual(calls, ["prepare", "initialize", "watch"])
+		self.assertIsNotNone(driver)
+
+	def test_the_watcher_is_not_started_when_the_engine_fails_to_start(self):
+		calls = []
+		with self.assertLogs(self.driver_module.log, "ERROR"), self.assertRaises(OSError):
+			self._construct(calls, initialize=OSError("no engine"))
+		self.assertEqual(calls, ["prepare", "initialize"])
+
+	def test_terminating_stops_the_watcher_first(self):
+		driver = self._construct([])
+		calls = []
+		runtime = self.driver_module._dictionary_runtime
+		with (
+			mock.patch.object(runtime, "stop_watching", lambda: calls.append("stop watching")),
+			mock.patch.object(self.eloquence, "close_audio", lambda: calls.append("close audio")),
+			mock.patch.object(self.eloquence, "terminate", lambda: calls.append("terminate")),
+			# NVDA's base class has a terminate() of its own, which the stand-in lacks.
+			mock.patch.object(_SynthBase, "terminate", lambda self: None, create=True),
+		):
+			driver.terminate()
+		self.assertEqual(calls, ["stop watching", "close audio", "terminate"])
+
+	def test_the_engine_is_started_on_the_generated_dictionary_folder(self):
+		# initialize() needs a real engine, so check what it is written to pass.
+		source = Path(self.eloquence.__file__).read_text(encoding="utf-8")
+		self.assertIn('"dataDirectory": _dictionary_runtime.active_directory()', source)
+		self.assertNotIn('"dataDirectory": os.path.join(os.path.dirname(eci_path))', source)
 
 
 if __name__ == "__main__":

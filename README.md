@@ -30,6 +30,65 @@ to both engines alike. The contours are tied to the sample rate the engine runs 
 At any other sample rate, or with a contour that has no version for the rate in
 use, audio plays raw.
 
+## Pronunciation dictionaries
+
+Eloquence can read words differently using pronunciation dictionaries. You choose
+which ones each language uses in NVDA's settings, under **Eloquence**, with the
+**Manage dictionaries...** button.
+
+In that dialog you pick a language and get its list of dictionaries, each with a
+checkbox:
+
+- **Dictionaries from an installed add-on**, such as a dictionary editor that
+  ships a community set.
+- **Downloaded dictionaries**. The dialog lists the GitHub repositories to
+  download from. Two community projects are listed to begin with, and you can
+  add others with **Add source...**. **Update Dictionaries** downloads them
+  all. Downloading never switches anything on.
+- **Your own files**, added with **Add file...**. The add-on keeps its own copy,
+  so you can move or delete the original.
+- **Personal entries from a dictionary editor**, when you have any. They are
+  always last.
+
+Where two dictionaries have the same word, the lower one in the list wins. Use
+**Move up** and **Move down** to change the order. Personal entries win over
+everything.
+
+British English, Latin American Spanish, Canadian French and Chinese have one
+more checkbox, such as **Also use American English dictionaries**. It is on to
+begin with, and the language's own dictionaries are applied on top.
+
+A new installation has nothing switched on. Changes take effect when you choose
+**OK**. An entry saved in a dictionary editor is picked up within a couple of
+seconds while Eloquence is speaking, with no restart.
+
+If a dictionary has entries that break the engine's rules, they are still used,
+because most of them work in practice. The dialog tells you how many there are
+and lists them in a field you can read and copy, so you can fix the ones that
+do not take effect.
+
+### Coming from an older version
+
+Older versions kept dictionary files inside the add-on's own folder and merged
+downloads into them. When you update:
+
+- Those files are copied once to `eciDictionaries\legacy\eloquence` in your NVDA
+  configuration folder, as a backup that is never changed afterwards.
+- They appear in the dialog as your own files, marked as imported. The ones
+  Eloquence was using are switched on, so speech stays as it was.
+- To start clean, switch the imported files off and choose the dictionaries you
+  want.
+
+Two things can sound different afterwards. Entries after a blank line in an old
+file are now used, where the engine used to stop reading at the blank line. And
+a dialect now gets its main language's entries as well as its own, where it used
+to get only its own file when it had one.
+
+Everything is stored in your NVDA configuration folder, in `eloquenceDictionaries`
+and `eciDictionaries`, so it survives add-on updates. To use dictionaries on the
+logon screen, copy your settings to it as usual with NVDA's **Use currently saved
+settings during sign-in** button.
+
 ## Traditional Chinese Script Conversion
 
 When the Mandarin Chinese voice is selected, Text Preprocessing applies Script

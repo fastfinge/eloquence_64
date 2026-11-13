@@ -116,7 +116,7 @@ Text handling is entirely on the Synth Driver side - `_eloquence_text.build()` h
 - Voice management and language switching (via `_resolve_voice_for_language`)
 - Text preprocessing with language-specific fixes (crash prevention patterns)
 - Speech command processing (IndexCommand, LangChangeCommand, BreakCommand, prosody)
-- Dictionary settings GUI panel (`EloquenceSettingsPanel`)
+- The Eloquence settings panel (`EloquenceSettingsPanel`), which opens the dictionaries dialog
 
 **`addon/synthDrivers/_eloquence.py`**: Synth Driver side wrapper. Provides:
 - `AudioPipeline`: the single Audio Playback Pipeline both backends feed - one queue, one `nvwave.WavePlayer`, one Speech Generation counter. There is deliberately only ever one, because two would mean two players competing for the output device and two counters deciding what to discard.
@@ -136,6 +136,47 @@ Text handling is entirely on the Synth Driver side - `_eloquence_text.build()` h
 - Dictionary loading and parameter management
 
 **`addon/synthDrivers/_eloquence_ipc.py`**: Simple IPC helpers with length-prefixed pickle protocol.
+
+### Pronunciation Dictionaries
+
+The engine loads only the **Active Dictionaries**: generated files in `<NVDA config>/eloquenceDictionaries/active/`, one `<language><slot>.dic` per language and Dictionary Slot. Nothing is loaded from the add-on folder, and `_eci_engine.py` has no fallback between languages: a dialect's file already holds its main language's entries when the user wants them. The design was agreed on fastfinge/eloquence_64#173, and follows EloquenceDictionaryManager's directory contract, version 1.
+
+Layout, all under NVDA's configuration so it survives add-on updates and reaches secure screens through NVDA's own configuration copy:
+
+- `eciDictionaries/personal/` — the Personal Dictionary Overlay, written by a dictionary editor. Read, never written.
+- `eciDictionaries/legacy/eloquence/` — the files an older version kept in the add-on folder, written once by `installTasks.py`.
+- `eloquenceDictionaries/sources/<set-id>/` — downloaded Dictionary Sources, in the contract's set layout.
+- `eloquenceDictionaries/own/` — copies of Own Dictionary Files.
+- `eloquenceDictionaries/active/` — the Active Dictionaries, plus `build.json`.
+- `eloquenceDictionaries/dictionaries.json` — the selections, with relative names only.
+
+The modules, from the bottom up. All but the last two are free of NVDA and wx imports:
+
+- `_dictionary_entries.py` — entry rules, checked against EDM's shared examples in `tests/data/`. When that file changes upstream, copy it and fix what disagrees.
+- `_dictionary_stack.py` — parse one file, merge layers, name downloaded sets.
+- `_dictionary_sets.py` — find Managed Dictionary Sets in installed add-ons (`dictionaries/contract.ini`) and in `sources/`.
+- `_dictionary_library.py` — the layout above, `dictionaries.json`, each language's Dictionary Stack, `build()` and the staleness fingerprint.
+- `_dictionary_update.py` — download a GitHub repository as sets.
+- `_dictionary_manager.py` — the dialog's working copy.
+- `_dictionary_runtime.py` — NVDA glue: `prepare()` before the engine starts, a 2-second watcher, synth reload.
+- `_dictionary_dialog.py` — the wx dialog.
+
+Rules that are easy to break, each measured on the proprietary engine, openevv and ReLoq C:
+
+- **Later rows win**, and so does the second copy of a key within one file. Root keys compare without case; main and abbreviation keys exactly.
+- **Main beats root in every engine**, whatever order the files were built in. So when a later layer has a word in root, `merge_layers()` drops it from main in the earlier layers. Nothing is dropped within one layer. This is why legacy files are imported root first and main last.
+- **An entry that breaks a rule is kept and reported**, never dropped: nearly all the community's rule-breaking entries work on every engine. Only an entry that cannot be written as a line is left out.
+- **A generated file may not exceed 8 MiB.** ReLoq C refuses a main or root file one byte over and then loads nothing from it.
+- **Blank lines are dropped.** The proprietary engine stops reading at one; the others skip it.
+- **A build must not change the settings.** `Settings.peek()` reads a language without adding it; `language()` is for editing. A build that added languages made every later staleness check rebuild.
+- **A language that cannot be built keeps its last good files**, and the others are still rebuilt.
+- **`onUninstall` must never delete either configuration folder**: NVDA runs the outgoing version's `onUninstall` on every add-on update.
+
+The Synth Driver reloads itself (`synthDriverHandler.setSynth`) when a rebuild changed a generated file, and only then. A rebuild that produces identical files reloads nothing.
+
+openevv never matches a root key with an accented letter (Mudb0y/openevv#59). That is upstream's to fix and is deliberately not worked around here: adding unaccented copies would change how those spellings are read on the other two engines.
+
+Testing: `tests/test_dictionary_dialog.py` builds the real dialog with wxPython and NVDA's own `guiHelper`, and skips unless `NVDA_SOURCE` names NVDA's `source` folder. `tests/test_addon_source_checks.py` checks every `wx.NAME` against real wxPython and every used module against the file's imports.
 
 ### Critical Implementation Details
 
@@ -213,7 +254,14 @@ eloquence_64/
 │       ├── eloquence.py                # Main synth driver
 │       ├── _eloquence.py               # Synth Driver side wrapper
 │       ├── _eloquence_updater.py       # Add-on Update: release check, download, install
-│       ├── _dictionary_update.py       # Dictionary Update: download, merge rules, atomic writes
+│       ├── _dictionary_entries.py      # What makes a dictionary entry valid, per slot
+│       ├── _dictionary_stack.py        # Parse a file, merge layers, name downloaded sets
+│       ├── _dictionary_sets.py         # Managed Dictionary Sets: the directory contract reader
+│       ├── _dictionary_library.py      # Config layout, dictionaries.json, building active/
+│       ├── _dictionary_update.py       # Dictionary Update: download sources as sets
+│       ├── _dictionary_runtime.py      # NVDA glue: rebuild before start, watch, reload
+│       ├── _dictionary_manager.py      # The dictionaries dialog's working copy, no wx
+│       ├── _dictionary_dialog.py       # The Manage dictionaries dialog
 │       ├── _background_work.py         # Runs update work off NVDA's UI thread behind a progress dialog
 │       ├── _eci_engine.py              # Shared ECI wrapper (both backends)
 │       ├── _contours.py                # Eloquence Contours: setting -> mode, adapter loading
@@ -276,4 +324,5 @@ When adding language support:
 - Update `LANGS` in `addon/synthDrivers/_eci_engine.py` (both backends read it from there)
 - Add BCP47 language tag mapping in `VOICE_BCP47`
 - Add encoding to `LANG_ENCODINGS` if it's a multi-byte language
+- Add the language to `LANGUAGES` in `addon/synthDrivers/_dictionary_library.py` so it gets a Dictionary Stack (`tests/test_dictionary_library.py` fails until the two tables agree), and to `language_names()` in `_dictionary_dialog.py`
 - Place `.syn` and ROM DLL files in `addon/synthDrivers/eloquence/`

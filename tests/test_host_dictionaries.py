@@ -133,44 +133,39 @@ class SpeechIndexTests(unittest.TestCase):
 
 
 class DictionaryLoadingTests(unittest.TestCase):
-	def test_dictionary_candidates_do_not_use_generic_fallback_for_non_english(self):
-		self.assertEqual(
-			engine.get_dictionary_candidates("esp"),
-			(
-				("espmain.dic",),
-				("esproot.dic",),
-				("espabbr.dic",),
-			),
-		)
+	def test_each_language_has_one_file_name_per_slot(self):
+		self.assertEqual(engine.dictionary_file_names("esp"), ("espmain.dic", "esproot.dic", "espabbr.dic"))
+		self.assertEqual(engine.dictionary_file_names("ENG"), ("engmain.dic", "engroot.dic", "engabbr.dic"))
+		self.assertEqual(engine.dictionary_file_names(""), ("enumain.dic", "enuroot.dic", "enuabbr.dic"))
 
-	def test_dictionary_candidates_allow_generic_fallback_for_english(self):
-		self.assertEqual(
-			engine.get_dictionary_candidates("eng"),
-			(
-				("engmain.dic", "enumain.dic", "main.dic"),
-				("engroot.dic", "enuroot.dic", "root.dic"),
-				("engabbr.dic", "enuabbr.dic", "abbr.dic"),
-			),
-		)
+	def test_a_dialect_does_not_fall_back_to_its_main_languages_files(self):
+		# Whether British English also uses American English dictionaries is the user's choice, made
+		# when the files are generated.  The engine loading enumain.dic here would overrule a no.
+		for dialect, main in (("eng", "enu"), ("esm", "esp"), ("frc", "fra"), ("chs", "enu")):
+			with self.subTest(dialect=dialect), tempfile.TemporaryDirectory() as data_directory:
+				for name in (f"{main}main.dic", f"{main}root.dic", f"{main}abbr.dic"):
+					open(os.path.join(data_directory, name), "w").close()
+				runtime = make_runtime(data_directory, dialect)
+				runtime._load_dictionaries()
+				self.assertEqual([call for call in runtime._dll.calls if call[0] == "loadDict"], [])
 
-	def test_dictionary_candidates_allow_regional_language_fallbacks(self):
-		self.assertEqual(
-			engine.get_dictionary_candidates("esm"),
-			(
-				("esmmain.dic", "espmain.dic"),
-				("esmroot.dic", "esproot.dic"),
-				("esmabbr.dic", "espabbr.dic"),
-			),
-		)
+	def test_files_with_no_language_in_their_name_are_not_loaded(self):
+		with tempfile.TemporaryDirectory() as data_directory:
+			for name in ("main.dic", "root.dic", "abbr.dic"):
+				open(os.path.join(data_directory, name), "w").close()
+			runtime = make_runtime(data_directory, "enu")
+			runtime._load_dictionaries()
+		self.assertEqual([call for call in runtime._dll.calls if call[0] == "loadDict"], [])
 
-	def test_dictionary_candidates_allow_english_fallback_for_chinese(self):
+	def test_a_dialect_loads_its_own_generated_files(self):
+		with tempfile.TemporaryDirectory() as data_directory:
+			for name in ("engmain.dic", "engroot.dic", "enumain.dic"):
+				open(os.path.join(data_directory, name), "w").close()
+			runtime = make_runtime(data_directory, "eng")
+			runtime._load_dictionaries()
 		self.assertEqual(
-			engine.get_dictionary_candidates("chs"),
-			(
-				("chsmain.dic", "enumain.dic", "main.dic"),
-				("chsroot.dic", "enuroot.dic", "root.dic"),
-				("chsabbr.dic", "enuabbr.dic", "abbr.dic"),
-			),
+			[call[3:] for call in runtime._dll.calls if call[0] == "loadDict"],
+			[(0, "engmain.dic"), (1, "engroot.dic")],
 		)
 
 	def test_loads_current_language_dictionaries_not_hard_coded_enu(self):
