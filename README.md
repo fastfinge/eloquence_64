@@ -30,6 +30,21 @@ to both engines alike. The contours are tied to the sample rate the engine runs 
 At any other sample rate, or with a contour that has no version for the rate in
 use, audio plays raw.
 
+## ReLoq C timing
+
+With ReLoq C chosen as the 64-bit engine, NVDA's Speech settings gain a
+**ReLoq C timing** setting. It chooses how often the engine
+updates the sound it is producing, which changes how speech sounds without
+changing how long it takes:
+
+| Choice | What it does |
+| --- | --- |
+| Original Eloquence (5 ms, default) | The timing of the original Eloquence engine, in every language. |
+| Fine (1 ms) | ReLoq C's finer timing, in every language. |
+| ReLoq C's choice for each language | What ReLoq C's own add-on uses by default: 5 ms for Castilian Spanish, 1 ms for the others. |
+
+The setting is not shown with the other engines, which have no such choice.
+
 ## Pronunciation dictionaries
 
 Eloquence can read words differently using pronunciation dictionaries. You choose
