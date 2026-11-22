@@ -134,6 +134,7 @@ class _EloquenceStub(types.ModuleType):
 		# to an in-process backend and none gets an engine's Text Builder options.
 		self.OPENEVV = "openevv"
 		self.RELOQ = "reloq"
+		self.DEFAULT_ACOUSTIC_CLOCK = "original"
 		self.direct_engine_for_voice = lambda voice_id: None
 		self.stopped = False
 		self.processed = False

@@ -436,7 +436,8 @@ class EloquenceSettingsPanel(gui.settingsDialogs.SettingsPanel):
 
 class SynthDriver(synthDriverHandler.SynthDriver):
 	settingsPanel = EloquenceSettingsPanel
-	supportedSettings = (
+	# Every setting but the one only ReLoq C has; see _get_supportedSettings().
+	_commonSettings = (
 		SynthDriver.VoiceSetting(),
 		SynthDriver.VariantSetting(),
 		SynthDriver.RateSetting(),
@@ -466,6 +467,12 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		# Translators: A synth setting available in speech settings dialog. A
 		# contour shapes the synthesizer's audio after it is produced.
 		DriverSetting("contour", _("Audio conto&ur"), defaultVal="raw"),
+	)
+	_reloqSettings = (
+		# Translators: A synth setting available in speech settings dialog. ReLoq C
+		# is the name of a speech engine, and the setting chooses how often it
+		# updates the sound it is producing.
+		DriverSetting("acousticClock", _("ReLoq C ti&ming"), defaultVal=_eloquence.DEFAULT_ACOUSTIC_CLOCK),
 	)
 	supportedCommands = {
 		IndexCommand,
@@ -827,6 +834,46 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 
 	def _set_contour(self, val):
 		_eloquence.set_contour(val)
+
+	def _get_supportedSettings(self):
+		"""The settings for this session's engine.
+
+		A property rather than the usual class attribute because "ReLoq C timing"
+		means nothing to the other two engines, and a setting that does nothing
+		would still be one more stop on everybody's synth settings ring.  The
+		engine is chosen while the driver loads, so the answer cannot change
+		during the life of one instance.
+		"""
+		if _eloquence.acoustic_clock_available():
+			return self._commonSettings + self._reloqSettings
+		return self._commonSettings
+
+	# ReLoq C's acoustic clock; see _eci_engine.RELOQ_ACOUSTIC_CLOCK.
+	_acousticClocks = OrderedDict(
+		(
+			# Translators: An option in the "ReLoq C timing" combo box in speech settings
+			("original", StringParameterInfo("original", _("Original Eloquence (5 ms)"))),
+			# Translators: An option in the "ReLoq C timing" combo box in speech settings
+			("fine", StringParameterInfo("fine", _("Fine (1 ms)"))),
+			(
+				"language",
+				StringParameterInfo(
+					"language",
+					# Translators: An option in the "ReLoq C timing" combo box in speech settings
+					_("ReLoq C's choice for each language"),
+				),
+			),
+		)
+	)
+
+	def _get_availableAcousticclocks(self):
+		return self._acousticClocks
+
+	def _get_acousticClock(self):
+		return _eloquence.requested_acoustic_clock()
+
+	def _set_acousticClock(self, val):
+		_eloquence.set_acoustic_clock(val)
 
 	def _set_pauseMode(self, val):
 		self._pause_mode = int(val)

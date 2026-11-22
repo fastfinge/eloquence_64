@@ -362,6 +362,30 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		self.eloquence.stop()
 		self.assertGreater(self.eloquence.current_generation(), before)
 
+	def test_the_reloq_c_timing_setting_is_offered_only_with_reloq_c(self):
+		# It means nothing to the other engines, and a setting that does nothing
+		# would still be a stop on everyone's synth settings ring.
+		driver = self._new_driver()
+
+		(clock,) = driver._reloqSettings
+
+		self.eloquence._direct_engine = None
+		self.assertNotIn(clock, driver._get_supportedSettings())
+		self.eloquence._direct_engine = self.eloquence.OPENEVV
+		self.assertEqual(driver._get_supportedSettings(), driver._commonSettings)
+		self.eloquence._direct_engine = self.eloquence.RELOQ
+		self.assertEqual(driver._get_supportedSettings(), driver._commonSettings + (clock,))
+
+	def test_the_reloq_c_timing_choices_are_the_clocks_the_engine_has(self):
+		driver = self._new_driver()
+		choices = driver._get_availableAcousticclocks()
+		self.assertEqual(set(choices), set(self.eloquence.ACOUSTIC_CLOCKS))
+		# NVDA lists them in this order, so the default comes first.
+		self.assertEqual(next(iter(choices)), self.eloquence.DEFAULT_ACOUSTIC_CLOCK)
+		self.assertEqual(driver._get_acousticClock(), self.eloquence.DEFAULT_ACOUSTIC_CLOCK)
+		driver._set_acousticClock("fine")
+		self.assertEqual(driver._get_acousticClock(), "fine")
+
 	def test_pause_reaches_the_shared_pipeline(self):
 		self.eloquence._pipeline.player = _FakePlayer()
 		self.eloquence.pause(True)  # must not raise
