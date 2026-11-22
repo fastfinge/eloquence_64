@@ -363,8 +363,8 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		self.assertGreater(self.eloquence.current_generation(), before)
 
 	def test_the_reloq_c_timing_setting_is_offered_only_with_reloq_c(self):
-		# It means nothing to the other engines, and a setting that does nothing
-		# would still be a stop on everyone's synth settings ring.
+		# It means nothing to the other engines, whose users would otherwise be
+		# shown a control that does nothing.
 		driver = self._new_driver()
 
 		(clock,) = driver._reloqSettings

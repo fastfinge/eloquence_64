@@ -839,8 +839,8 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 		"""The settings for this session's engine.
 
 		A property rather than the usual class attribute because "ReLoq C timing"
-		means nothing to the other two engines, and a setting that does nothing
-		would still be one more stop on everybody's synth settings ring.  The
+		means nothing to the other two engines, and the Speech settings panel
+		would otherwise show their users a control that does nothing.  The
 		engine is chosen while the driver loads, so the answer cannot change
 		during the life of one instance.
 		"""

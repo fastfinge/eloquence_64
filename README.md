@@ -32,8 +32,8 @@ use, audio plays raw.
 
 ## ReLoq C timing
 
-With ReLoq C chosen as the 64-bit engine, NVDA's Speech settings and the synth
-settings ring gain a **ReLoq C timing** setting. It chooses how often the engine
+With ReLoq C chosen as the 64-bit engine, NVDA's Speech settings gain a
+**ReLoq C timing** setting. It chooses how often the engine
 updates the sound it is producing, which changes how speech sounds without
 changing how long it takes:
 
