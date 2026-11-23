@@ -51,6 +51,7 @@ Usage:
     python fetch_eci.py --reloq-release   # take ReLoq C's newest release, not CI
 """
 
+import http.client
 import json
 import os
 import subprocess
@@ -58,6 +59,7 @@ import sys
 import shutil
 import struct
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -127,7 +129,7 @@ def fetch():
 	tmpfd, tmppath = tempfile.mkstemp(suffix=".nvda-addon")
 	os.close(tmpfd)
 	try:
-		urllib.request.urlretrieve(UPSTREAM_URL, tmppath)
+		_retrying(lambda: urllib.request.urlretrieve(UPSTREAM_URL, tmppath), UPSTREAM_URL)
 		print("Extracting proprietary files...")
 		with zipfile.ZipFile(tmppath, "r") as zf:
 			for zip_path, dest_name in PROPRIETARY_FILES.items():
@@ -187,14 +189,58 @@ def _github_token():
 	return result.stdout.strip() or None
 
 
+# GitHub is occasionally, briefly, unwell: raw.githubusercontent.com answered 503
+# for a file that had been there a minute earlier and was there again a minute
+# later, which failed a build whose only fault was the timing.  These are worth
+# riding out rather than failing the build for; an answer about the request
+# itself (401, 403, 404) is not, because repeating it only wastes build time.
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+RETRY_ATTEMPTS = 4
+RETRY_DELAY = 2.0
+
+
+def _retrying(operation, description):
+	"""Run *operation*, retrying a transient failure, and return its result.
+
+	Retries 5xx and 429 answers, and connection errors such as a reset or a
+	body that stops early, because those say nothing about the request being
+	wrong.  The delay doubles between attempts, so the default four attempts
+	span about fourteen seconds of GitHub being briefly unwell.
+	"""
+	delay = RETRY_DELAY
+	for attempt in range(1, RETRY_ATTEMPTS + 1):
+		try:
+			return operation()
+		except urllib.error.HTTPError as error:
+			if error.code not in RETRY_STATUSES or attempt == RETRY_ATTEMPTS:
+				raise
+			reason = f"HTTP {error.code}"
+		except urllib.error.URLError as error:
+			if attempt == RETRY_ATTEMPTS:
+				raise
+			reason = str(error.reason)
+		except (http.client.IncompleteRead, ConnectionError, TimeoutError) as error:
+			if attempt == RETRY_ATTEMPTS:
+				raise
+			reason = type(error).__name__
+		print(f"  {description}: {reason}; retrying in {delay:.0f}s")
+		time.sleep(delay)
+		delay *= 2
+	raise AssertionError("unreachable: the last attempt either returns or raises")
+
+
 def _github_json(url):
 	"""Read a GitHub API response, authenticated when a token can be found."""
 	request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
 	token = _github_token()
 	if token:
 		request.add_header("Authorization", f"Bearer {token}")
-	with urllib.request.urlopen(request) as response:
-		return json.load(response)
+
+	def read():
+		with urllib.request.urlopen(request) as response:
+			return json.load(response)
+
+	return _retrying(read, url)
 
 
 class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
@@ -224,8 +270,14 @@ def _download(url, dest_path, token=None, accept=None):
 		headers["Authorization"] = f"Bearer {token}"
 	request = urllib.request.Request(url, headers=headers)
 	opener = urllib.request.build_opener(_DropAuthOnRedirect)
-	with opener.open(request) as response, open(dest_path, "wb") as dst:
-		shutil.copyfileobj(response, dst)
+
+	def download():
+		# Opened for writing inside the attempt, so a retried transfer replaces a
+		# half-written file rather than appending to it.
+		with opener.open(request) as response, open(dest_path, "wb") as dst:
+			shutil.copyfileobj(response, dst)
+
+	_retrying(download, url)
 
 
 def _extract(zf, member, dest_dir, dest_name=None):
@@ -285,7 +337,8 @@ def fetch_openevv_release():
 	tmpfd, tmppath = tempfile.mkstemp(suffix=".zip")
 	os.close(tmpfd)
 	try:
-		urllib.request.urlretrieve(asset["browser_download_url"], tmppath)
+		url = asset["browser_download_url"]
+		_retrying(lambda: urllib.request.urlretrieve(url, tmppath), url)
 		with zipfile.ZipFile(tmppath, "r") as zf:
 			members = {name.lower(): name for name in zf.namelist()}
 			dll_member = members.get(OPENEVV_DLL_MEMBER.lower())
