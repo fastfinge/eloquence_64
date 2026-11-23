@@ -1,6 +1,9 @@
 import json
 import os
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 from addon.synthDrivers import _dictionary_library as library
@@ -8,6 +11,7 @@ from addon.synthDrivers import _dictionary_sets as sets
 from addon.synthDrivers import _dictionary_stack as stack
 from addon.synthDrivers import _eci_engine
 from addon.synthDrivers._dictionary_library import Row
+from tests.windows_file_locks import FILE_SHARE_READ, held_open
 
 CAT, DOG, COW = "`[.1kAt]", "`[.1dOg]", "`[.1kW]"
 
@@ -115,12 +119,89 @@ class SettingsTests(LibraryTestCase):
 		self.assertNotIn(self.paths.config_directory.replace("\\", "\\\\"), text)
 		self.assertNotIn(os.sep + "own", text)
 
-	def test_an_unreadable_file_falls_back_to_the_defaults(self):
+	def test_a_file_that_cannot_be_parsed_raises_and_is_never_read_as_the_defaults(self):
+		os.makedirs(self.paths.data)
+		for text in ("{ not json", "[]", '{"languages": {"enu": {"rows": [{"kind": "set"}]}}}'):
+			with self.subTest(text=text):
+				with open(self.paths.settings_file, "w", encoding="utf-8") as f:
+					f.write(text)
+				with self.assertRaises(library.SettingsUnreadable):
+					library.load_settings(self.paths)
+
+	def test_fields_a_later_version_added_are_ignored(self):
 		os.makedirs(self.paths.data)
 		with open(self.paths.settings_file, "w", encoding="utf-8") as f:
-			f.write("{ not json")
-		with self.assertLogs(library.log, "ERROR"):
-			self.assertEqual(library.load_settings(self.paths), library.Settings())
+			json.dump(
+				{
+					"version": 2,
+					"legacy_imported": True,
+					"something_new": {"a": 1},
+					"languages": {
+						"enu": {"rows": [{"kind": "set", "id": "github.a.b", "on": True, "priority": 3}]}
+					},
+				},
+				f,
+			)
+		settings = library.load_settings(self.paths)
+		self.assertEqual(settings.peek("enu").rows, [Row("set", "github.a.b", on=True)])
+		self.assertTrue(settings.legacy_imported)
+
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_a_read_another_program_blocks_for_a_moment_waits_for_it(self):
+		self.settings.sources.append("example/Repo")
+		library.save_settings(self.paths, self.settings)
+		with held_open(self.paths.settings_file, share=0, for_seconds=0.2):
+			self.assertEqual(library.load_settings(self.paths), self.settings)
+
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_a_save_another_program_blocks_for_a_moment_waits_for_it(self):
+		library.save_settings(self.paths, self.settings)
+		self.settings.sources.append("example/Repo")
+		# Open for reading without delete sharing, as a virus scanner might: the replace is refused.
+		with held_open(self.paths.settings_file, share=FILE_SHARE_READ, for_seconds=0.2):
+			library.save_settings(self.paths, self.settings)
+		self.assertEqual(library.load_settings(self.paths), self.settings)
+		self.assertEqual(os.listdir(self.paths.data), ["dictionaries.json"])
+
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_a_read_blocked_for_longer_raises_rather_than_give_the_defaults(self):
+		library.save_settings(self.paths, self.settings)
+		with held_open(self.paths.settings_file, share=0), self.assertRaises(library.SettingsUnreadable):
+			library.load_settings(self.paths)
+
+	def test_saves_and_reads_at_the_same_time_always_read_what_was_saved(self):
+		# The dialog's OK saves while the watcher reads. On Windows each could fail the other: before
+		# the fix, about one read in thirty came back as the defaults and saves raised PermissionError.
+		self.settings.language("enu").rows.append(Row("set", "github.a.b", on=True))
+		self.settings.legacy_imported = True
+		library.save_settings(self.paths, self.settings)
+		stop, save_errors, wrong_reads, reads, saves = threading.Event(), [], [], 0, [0]
+
+		def save():
+			while not stop.is_set():
+				try:
+					library.save_settings(self.paths, self.settings)
+				except Exception as error:
+					save_errors.append(repr(error))
+				saves[0] += 1
+
+		saver = threading.Thread(target=save)
+		saver.start()
+		try:
+			deadline = time.monotonic() + 1.5
+			while time.monotonic() < deadline:
+				try:
+					loaded = library.load_settings(self.paths)
+				except library.SettingsUnreadable as error:
+					loaded = error
+				reads += 1
+				if loaded != self.settings:
+					wrong_reads.append(repr(loaded))
+		finally:
+			stop.set()
+			saver.join()
+		self.assertGreater(min(reads, saves[0]), 20)
+		self.assertEqual((wrong_reads[:3], save_errors[:3]), ([], []))
 
 
 class ReconcileTests(LibraryTestCase):
