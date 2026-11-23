@@ -17,6 +17,9 @@ the real DLL, so a regression upstream shows up here rather than in NVDA:
 * Volume works across its whole range in every language, not only German.
 * With dictionaries loaded, eciSetDict and a language change are instant
   (#17), not 100+ ms each.
+* Its acoustic clock (parameter 0x101b) starts at 1 ms, takes all three values
+  on a live handle, changes the audio without changing its length, and
+  survives a language change and eciCopyVoice.
 
 They need the fetched engine and 64-bit Python, and skip otherwise.
 """
@@ -68,7 +71,7 @@ def _options(**overrides):
 	"needs the fetched ReLoq C engine and 64-bit Python",
 )
 class RealEngineTests(unittest.TestCase):
-	def _start(self, data_directory=""):
+	def _start(self, data_directory="", **overrides):
 		self.events = []
 		config = engine.EngineConfig(
 			eci_path=str(_REAL_DLL),
@@ -78,6 +81,7 @@ class RealEngineTests(unittest.TestCase):
 			enable_phrase_prediction=False,
 			voice_variant=1,
 			rewrite_ini=False,
+			**overrides,
 		)
 		instance = engine.EciEngine(lambda event, **payload: self.events.append((event, payload)), config)
 		instance.start()
@@ -282,6 +286,74 @@ class RealEngineTests(unittest.TestCase):
 			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
 
 		self.assertLess(median_ms(switch), 20)
+
+	# The acoustic clock; see _eci_engine.RELOQ_ACOUSTIC_CLOCK.  The sentence is
+	# long enough that the two clocks cannot coincide by chance.
+	_CLOCK_TEXT = "Addictive drums, and a quick test of the acoustic clock."
+
+	def _clock(self):
+		return self.engine._dll.eciGetParam(self.engine._handle, engine.RELOQ_ACOUSTIC_CLOCK)
+
+	def test_a_fresh_handle_is_on_the_fine_clock(self):
+		# Which is why the add-on has to ask for the original one.
+		self.assertEqual(self._clock(), engine.RELOQ_CLOCK_FINE)
+		self.assertNotIn(engine.RELOQ_ACOUSTIC_CLOCK, self.engine.get_state()["params"])
+
+	def test_the_clock_asked_for_at_start_is_the_one_it_speaks_on(self):
+		fine, _ = self._speak(self._CLOCK_TEXT)
+		self.engine = self._start(acoustic_clock=engine.RELOQ_CLOCK_ORIGINAL)
+		self.assertEqual(self._clock(), engine.RELOQ_CLOCK_ORIGINAL)
+		original, _ = self._speak(self._CLOCK_TEXT)
+		# A different sound in the same time: the clock holds the synthesiser's
+		# targets for longer, and leaves the durations alone.
+		self.assertNotEqual(original, fine)
+		self.assertEqual(len(original), len(fine))
+
+	def test_the_clock_changes_on_a_live_handle(self):
+		fine, _ = self._speak(self._CLOCK_TEXT)
+		self.engine.set_param(engine.RELOQ_ACOUSTIC_CLOCK, engine.RELOQ_CLOCK_ORIGINAL)
+		live, _ = self._speak(self._CLOCK_TEXT)
+		self.engine.set_param(engine.RELOQ_ACOUSTIC_CLOCK, engine.RELOQ_CLOCK_FINE)
+		back, _ = self._speak(self._CLOCK_TEXT)
+		self.engine = self._start(acoustic_clock=engine.RELOQ_CLOCK_ORIGINAL)
+		self.assertEqual(self._speak(self._CLOCK_TEXT)[0], live)
+		self.assertEqual(back, fine)
+
+	def test_the_clock_survives_a_language_change_and_a_variant(self):
+		self.engine = self._start(acoustic_clock=engine.RELOQ_CLOCK_ORIGINAL)
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, DEU)
+		self.engine.copy_voice(2)
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
+		self.engine.copy_voice(1)
+		self.assertEqual(self._clock(), engine.RELOQ_CLOCK_ORIGINAL)
+		travelled, _ = self._speak(self._CLOCK_TEXT)
+		self.engine = self._start(acoustic_clock=engine.RELOQ_CLOCK_ORIGINAL)
+		self.assertEqual(self._speak(self._CLOCK_TEXT)[0], travelled)
+
+	def test_the_per_language_clock_is_original_only_for_castilian_spanish(self):
+		# Of the languages this add-on has.  ReLoq C also uses it for Greek.
+		def speak_on(clock, voice_id, text):
+			self.engine = self._start(acoustic_clock=clock)
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, voice_id)
+			return self._speak(text)[0]
+
+		for code, text, expected in (
+			("esp", "Esto es una prueba del reloj.", engine.RELOQ_CLOCK_ORIGINAL),
+			("esm", "Esto es una prueba del reloj.", engine.RELOQ_CLOCK_FINE),
+			("enu", self._CLOCK_TEXT, engine.RELOQ_CLOCK_FINE),
+			("deu", "Das ist ein kurzer Test der Uhr.", engine.RELOQ_CLOCK_FINE),
+		):
+			with self.subTest(language=code):
+				voice_id = engine.LANGS[code]
+				chosen = speak_on(engine.RELOQ_CLOCK_PER_LANGUAGE, voice_id, text)
+				self.assertEqual(chosen, speak_on(expected, voice_id, text))
+				other = 1 - expected
+				self.assertNotEqual(chosen, speak_on(other, voice_id, text))
+
+	def test_a_value_it_does_not_have_is_refused_and_not_recorded(self):
+		self.engine.set_param(engine.RELOQ_ACOUSTIC_CLOCK, 3)
+		self.assertEqual(self._clock(), engine.RELOQ_CLOCK_FINE)
+		self.assertNotIn(engine.RELOQ_ACOUSTIC_CLOCK, self.engine.get_state()["params"])
 
 
 if __name__ == "__main__":

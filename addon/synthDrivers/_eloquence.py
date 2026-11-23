@@ -939,6 +939,18 @@ DIRECT_ENGINE_NAMES = {
 	RELOQ: "ReLoq C",
 }
 
+# The "ReLoq C timing" setting, as stored, to the engine's own value; see
+# _eci_engine.RELOQ_ACOUSTIC_CLOCK.  The default is the original engine's 5 ms
+# clock in every language, because sounding like Eloquence 6.1 is what this
+# add-on is for.  That differs from ReLoq C itself, where a fresh handle uses
+# 1 ms, and from its own add-on, which chooses per language.
+ACOUSTIC_CLOCKS = {
+	"original": _engine.RELOQ_CLOCK_ORIGINAL,
+	"fine": _engine.RELOQ_CLOCK_FINE,
+	"language": _engine.RELOQ_CLOCK_PER_LANGUAGE,
+}
+DEFAULT_ACOUSTIC_CLOCK = "original"
+
 
 def direct_engine_path(engine: str) -> str:
 	"""Where fetch_eci.py installs *engine*'s eci.dll inside the add-on."""
@@ -981,6 +993,8 @@ _direct_sample_rates: tuple = ()
 # The rate the user asked for, which is not necessarily what any one engine runs
 # at.  See EngineClient.sample_rate.
 _requested_sample_rate: int = _engine.SAMPLE_RATE
+# ReLoq C's acoustic clock, as the setting's name; see ACOUSTIC_CLOCKS.
+_requested_acoustic_clock: str = DEFAULT_ACOUSTIC_CLOCK
 _engine_initialize_payload: Dict[str, Any] = {}
 synth_queue = queue.Queue()
 params: Dict[int, int] = {}
@@ -1108,8 +1122,10 @@ def _direct_initialize_payload(payload: Dict[str, Any], engine: Optional[str] = 
 	that both 64-bit engines resolve their own data relative to that library and
 	need none of the C:\\dummy\\ rewriting the proprietary ECI.INI does; and
 	eciWideband for openevv (see _eci_engine.ECI_WIDEBAND).  ReLoq C has no such
-	parameter, and from 1.1 needs nothing else of its own: it takes the same
-	standard ECI calls as openevv.
+	parameter, and from 1.1 takes the same standard ECI calls as openevv.  The
+	one thing of its own it is sent is its acoustic clock, which is a choice
+	about how it sounds rather than an adapter (see
+	_eci_engine.RELOQ_ACOUSTIC_CLOCK).
 
 	``dataDirectory`` is passed through unchanged, and deliberately so.  It points
 	at the generated dictionary files in NVDA's configuration (see
@@ -1124,7 +1140,9 @@ def _direct_initialize_payload(payload: Dict[str, Any], engine: Optional[str] = 
 	payload = dict(payload)
 	payload["eciPath"] = direct_engine_path(engine)
 	payload["rewriteIni"] = False
-	if engine != RELOQ:
+	if engine == RELOQ:
+		payload["acousticClock"] = ACOUSTIC_CLOCKS[_requested_acoustic_clock]
+	else:
 		payload["wideband"] = True
 	return payload
 
@@ -1281,7 +1299,7 @@ def _sync_eci_ini_paths(eloquence_dir):
 
 def initialize(indexCallback=None):
 	global onIndexReached, _direct_client, _direct_engine, _direct_languages, _active, _engine_initialize_payload
-	global _direct_sample_rates, _requested_sample_rate
+	global _direct_sample_rates, _requested_sample_rate, _requested_acoustic_clock
 	eci_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "eloquence", "eci.dll"))
 	# Repair ECI.INI before the host loads the engine so voices resolve no
 	# matter where this add-on folder was copied from.
@@ -1295,6 +1313,10 @@ def initialize(indexCallback=None):
 		_requested_sample_rate = _engine.SAMPLE_RATE
 	if _requested_sample_rate not in _engine.SAMPLE_RATE_VALUES.values():
 		_requested_sample_rate = _engine.SAMPLE_RATE
+	# Before any backend starts, so ReLoq C comes up on the chosen clock.
+	_requested_acoustic_clock = str(voice_conf.get("acousticClock", DEFAULT_ACOUSTIC_CLOCK))
+	if _requested_acoustic_clock not in ACOUSTIC_CLOCKS:
+		_requested_acoustic_clock = DEFAULT_ACOUSTIC_CLOCK
 	# Before the device opens, so a contour that upsamples opens it at its own
 	# output rate rather than reopening it straight away.
 	set_contour(voice_conf.get("contour", _contours.DEFAULT_SETTING))
@@ -1432,6 +1454,55 @@ def set_sample_rate(rate: int) -> int:
 	synth_queue.put(([(_apply_sample_rate_on_worker, (rate,))], current_generation()))
 	process()
 	return rate
+
+
+def acoustic_clock_available() -> bool:
+	"""Whether the engine chosen for this session has an acoustic clock to set."""
+	return _direct_engine == RELOQ
+
+
+def requested_acoustic_clock() -> str:
+	return _requested_acoustic_clock
+
+
+def _apply_acoustic_clock_on_worker(value: int) -> None:
+	"""Hand ReLoq C its clock.  Runs on the synthesis worker.
+
+	Addressed to the Direct Backend rather than to whichever backend is active:
+	the Eloquence Host Process has no such parameter.  A Direct Backend that has
+	not started yet takes the value from its initialize payload instead.
+	"""
+	if _direct_client is None or not _direct_client.started or _direct_engine != RELOQ:
+		return
+	try:
+		_direct_client.send_command("setParam", paramId=_engine.RELOQ_ACOUSTIC_CLOCK, value=value)
+	except Exception:
+		LOGGER.exception("Failed to set the ReLoq C acoustic clock")
+
+
+def set_acoustic_clock(setting: str) -> str:
+	"""Choose ReLoq C's acoustic clock, by the setting's name.
+
+	Queued for the EloquenceSynthWorker like a sample-rate change, and for the
+	same two reasons: that is the one thread allowed to touch the in-process
+	engine, and going through its queue means text already queued is spoken on
+	the clock it was queued under.  Queued with no Speech Generation, because
+	the worker discards anything stamped with a generation that has since been
+	cancelled, and NVDA cancels speech freely while a setting is being changed:
+	a discarded change would leave the engine on the old clock with the setting
+	showing the new one.  Remembered even when ReLoq C is not the engine in use,
+	so that it is there when it next is.
+	"""
+	global _requested_acoustic_clock
+	setting = str(setting)
+	if setting not in ACOUSTIC_CLOCKS:
+		LOGGER.warning("Ignoring unknown acoustic clock %r", setting)
+		return _requested_acoustic_clock
+	_requested_acoustic_clock = setting
+	if acoustic_clock_available():
+		synth_queue.put(([(_apply_acoustic_clock_on_worker, (ACOUSTIC_CLOCKS[setting],))], None))
+		process()
+	return setting
 
 
 def set_contour(setting: str) -> str:
@@ -1623,10 +1694,13 @@ def _synth_worker_loop() -> None:
 			synth_queue.task_done()
 			break
 		lst, seq = item
-		if seq < _pipeline.sequence:
-			synth_queue.task_done()
-			continue
-		_pipeline.current_seq = seq
+		# No generation means engine housekeeping rather than speech: it belongs
+		# to no utterance, so a cancellation must not discard it.
+		if seq is not None:
+			if seq < _pipeline.sequence:
+				synth_queue.task_done()
+				continue
+			_pipeline.current_seq = seq
 		try:
 			for func, args in lst:
 				try:
