@@ -7,6 +7,7 @@ screens through NVDA's own copy of the configuration:
     personal/                   the user's own entries, written by a dictionary editor; read only here
     legacy/eloquence/           the files older versions of this add-on kept, written once
   eloquenceDictionaries/        this add-on's own
+    legacy/<n>/                 old files backed up later, after going back to an older version
     sources/<set-id>/           Dictionary Sources this add-on downloaded
     own/                        copies of files the user added
     active/                     the generated files; the only ones the engine loads
@@ -24,7 +25,9 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass, field, replace
+import threading
+import time
+from dataclasses import asdict, dataclass, field, fields, replace
 
 from . import _dictionary_entries as entries
 from . import _dictionary_sets
@@ -47,6 +50,11 @@ DIALECT_BASES = {"eng": "enu", "esm": "esp", "frc": "fra", "chs": "enu"}
 DEFAULT_SOURCES = ("eigencrow/IBMTTSDictionaries", "Mohamed00/AltIBMTTSDictionaries")
 
 _BUILD_RECORD = "build.json"
+# Written into a later backup of old files once its rows are saved, so it is imported once.
+_IMPORTED_MARKER = ".imported"
+# How long to keep trying a file another program has open, such as a virus scanner.
+_IN_USE_RETRY_SECONDS = 0.5
+_IN_USE_RETRY_INTERVAL = 0.02
 _SLOT_IN_NAME = re.compile(r"(main|root|abbr)(?=\.dic$)", re.IGNORECASE)
 
 
@@ -65,6 +73,10 @@ class DictionaryPaths:
 	@property
 	def data(self):
 		return os.path.join(self.config_directory, "eloquenceDictionaries")
+
+	@property
+	def later_legacy(self):
+		return os.path.join(self.data, "legacy")
 
 	@property
 	def sources(self):
@@ -147,29 +159,67 @@ class Settings:
 			settings.sources = [str(source) for source in data["sources"]]
 		for code, language in data.get("languages", {}).items():
 			settings.languages[code] = LanguageSettings(
-				rows=[Row(**row) for row in language.get("rows", ())],
+				# A later version may add fields to a row; this one ignores them.
+				rows=[
+					Row(**{key: value for key, value in row.items() if key in _ROW_FIELDS})
+					for row in language.get("rows", ())
+				],
 				personal=bool(language.get("personal", True)),
 				dialect=bool(language.get("dialect", True)),
 			)
 		return settings
 
 
+_ROW_FIELDS = frozenset(row_field.name for row_field in fields(Row))
+# Held around every read and write of dictionaries.json. The watcher and the dialog run in the
+# same process, and on Windows a read during the other's save fails with a sharing violation.
+_settings_lock = threading.RLock()
+
+
+class SettingsUnreadable(Exception):
+	"""dictionaries.json is there but cannot be read. It is left exactly as it is."""
+
+	def __init__(self, path, cause):
+		super().__init__(f"Could not read {path}: {cause!r}")
+		self.path = path
+		self.cause = cause
+
+
 def load_settings(paths):
-	"""Read dictionaries.json. A missing or unreadable file gives the defaults: nothing switched on."""
+	"""Read dictionaries.json. A missing file gives the defaults: nothing switched on.
+
+	A file that is there but cannot be read raises SettingsUnreadable. It never gives the defaults,
+	because saving those would replace every selection the user made.
+	"""
+	with _settings_lock:
+		try:
+			data = _while_in_use(_read_file, paths.settings_file)
+		except FileNotFoundError:
+			return Settings()
+		except OSError as error:
+			raise SettingsUnreadable(paths.settings_file, error) from error
 	try:
-		with open(paths.settings_file, encoding="utf-8") as f:
-			return Settings.from_json(json.load(f))
-	except FileNotFoundError:
-		return Settings()
-	except (OSError, ValueError, TypeError, AttributeError) as error:
-		log.error("Could not read %s, starting from no selections: %r", paths.settings_file, error)
-		return Settings()
+		return Settings.from_json(json.loads(data.decode("utf-8")))
+	except (ValueError, TypeError, AttributeError) as error:
+		raise SettingsUnreadable(paths.settings_file, error) from error
 
 
 def save_settings(paths, settings):
-	_write_atomically(
-		paths.settings_file, json.dumps(settings.to_json(), indent="\t", ensure_ascii=False).encode("utf-8")
-	)
+	with _settings_lock:
+		_write_atomically(
+			paths.settings_file,
+			json.dumps(settings.to_json(), indent="\t", ensure_ascii=False).encode("utf-8"),
+		)
+
+
+def _keep_unreadable_copy(paths):
+	"""Copy an unreadable dictionaries.json aside for whoever repairs it. Returns the copy's path or ""."""
+	copy = os.path.join(paths.data, "dictionaries.unreadable.json")
+	try:
+		shutil.copyfile(paths.settings_file, copy)
+	except OSError:
+		return ""
+	return copy
 
 
 def reconcile_sets(settings, sets):
@@ -213,12 +263,17 @@ def remove_set_rows(settings, set_ids):
 
 
 def import_legacy(paths, settings, old_dictionary_directory=None):
-	"""Take in, once, the dictionary files an older version of the add-on kept. Returns True if it ran.
+	"""Take in the dictionary files older versions of the add-on kept. Returns (changed, backups).
 
-	Older versions loaded .dic files from the add-on's own folder. The installer copies them to
-	legacy/eloquence in the configuration; if that did not happen and they are still in
-	old_dictionary_directory, they are backed up from there first. Each file then becomes one of the
-	user's own files, marked as imported:
+	Older versions loaded .dic files from the add-on's own folder. The installer copies them once
+	to legacy/eloquence in the configuration, and also carries them into the new add-on folder, so
+	going back to an older version still finds them. Files in old_dictionary_directory that no
+	backup holds yet are backed up here: to legacy/eloquence if there is none, which a failed
+	installer backup leaves; otherwise to a later backup, eloquenceDictionaries/legacy/<n>, which
+	going back to an older version, changing its files and updating again leaves.
+
+	legacy/eloquence is imported once, then each later backup once, on top of what came before.
+	Each file becomes one of the user's own files, marked as imported:
 
 	- A file the old engine was loading is switched on, so speech stays as it was. One it never
 	  loaded, such as main.dic beside enumain.dic, comes in switched off.
@@ -226,39 +281,59 @@ def import_legacy(paths, settings, old_dictionary_directory=None):
 	  is the only language the old engine loaded it for.
 	- A file whose name says neither language nor slot is left in the backup and not imported.
 
-	The backup itself is never changed: a dictionary editor reads it to recover hand-made entries.
+	A backup holding a file that cannot be read is imported at a later check, once it can be.
+	The backups are never changed: a dictionary editor reads legacy/eloquence to recover hand-made
+	entries. backups lists the later backups taken in; refresh() marks each one as imported once
+	the settings holding its rows are saved.
 	"""
+	backed_up = _back_up_old_files(paths, old_dictionary_directory)
+	changed = False
+	if not settings.legacy_imported:
+		if os.path.isdir(paths.legacy):
+			done = _import_backup(paths, settings, paths.legacy)
+		else:
+			# Nothing to import, which is remembered; unless that is because backing up failed.
+			done = backed_up
+		if done:
+			settings.legacy_imported = True
+			changed = True
+	backups = []
 	if settings.legacy_imported:
-		return False
-	if not os.path.isdir(paths.legacy) and old_dictionary_directory:
-		if old_dictionary_directory in _failed_backups:
-			return False
-		try:
-			_back_up_legacy(old_dictionary_directory, paths.legacy)
-		except OSError:
-			# Tried again at the next start, not at every check: once in the log is enough.
-			_failed_backups.add(old_dictionary_directory)
-			log.exception("Could not back up the old dictionary files from %s", old_dictionary_directory)
-			return False
-	settings.legacy_imported = True
-	if not os.path.isdir(paths.legacy):
-		return True
-	names = {name.lower(): name for name in sorted(os.listdir(paths.legacy)) if name.lower().endswith(".dic")}
-	loaded = _files_the_old_engine_loaded(set(names))
+		backups = [
+			backup
+			for backup in _later_backups(paths, pending=True)
+			if _import_backup(paths, settings, backup)
+		]
+	return changed or bool(backups), backups
+
+
+def _import_backup(paths, settings, directory):
+	"""Add a backup's files to the stacks. Returns False, having added nothing, if one cannot be read."""
+	names = {name.lower(): name for name in sorted(os.listdir(directory)) if name.lower().endswith(".dic")}
+	files = []
 	for lower in sorted(names, key=_legacy_import_order):
 		match = _LEGACY_NAME.fullmatch(lower)
 		language = (match.group(1) or "enu") if match else None
 		if language not in LANGUAGES:
+			files.append((lower, None, None, b""))
+			continue
+		path = os.path.join(directory, names[lower])
+		try:
+			data = _read_file(path)
+		except OSError as error:
+			if _not_reported_yet(path, error):
+				log.error(
+					"Could not read the old dictionary file %s; importing it once it can be: %r", path, error
+				)
+			return False
+		_reported.pop(path, None)
+		files.append((lower, language, match.group(2), data))
+	loaded = _files_the_old_engine_loaded(set(names))
+	for lower, language, slot, data in files:
+		if language is None:
 			log.warning(
 				"Not importing %s: its name does not say which language and slot it is for", names[lower]
 			)
-			continue
-		slot = match.group(2)
-		try:
-			with open(os.path.join(paths.legacy, names[lower]), "rb") as f:
-				data = f.read()
-		except OSError:
-			log.exception("Could not read the old dictionary file %s", names[lower])
 			continue
 		if language not in UNPARSED_LANGUAGES:
 			data, dropped = _salvage(data, language, slot)
@@ -274,7 +349,20 @@ def import_legacy(paths, settings, old_dictionary_directory=None):
 
 
 _LEGACY_NAME = re.compile(r"([a-z]{3})?(main|root|abbr)\.dic")
-_failed_backups = set()
+# {old dictionary folder: whether backing it up worked}. Checked once per start: its files change
+# only when an add-on is installed, and a failure belongs in the log once.
+_old_directories_checked = {}
+# {file: the error last logged for it}, so a problem that lasts is logged once and not at every
+# check the watcher makes.
+_reported = {}
+
+
+def _not_reported_yet(subject, error):
+	"""Whether error is new for subject, and so worth logging. Remembers it as reported."""
+	if _reported.get(subject) == repr(error):
+		return False
+	_reported[subject] = repr(error)
+	return True
 
 
 def _legacy_import_order(lower_name):
@@ -293,18 +381,88 @@ def _legacy_import_order(lower_name):
 	)
 
 
-def _back_up_legacy(source_directory, legacy_directory):
-	if not os.path.isdir(source_directory):
-		return
-	names = [name for name in sorted(os.listdir(source_directory)) if name.lower().endswith(".dic")]
+def _back_up_old_files(paths, old_directory):
+	"""Back up the .dic files in old_directory, unless a backup already holds exactly those files.
+
+	Returns False if that failed; it is tried again at the next start.
+	"""
+	if not old_directory:
+		return True
+	if old_directory not in _old_directories_checked:
+		try:
+			_back_up_new_old_files(paths, old_directory)
+			_old_directories_checked[old_directory] = True
+		except OSError:
+			_old_directories_checked[old_directory] = False
+			log.exception("Could not back up the old dictionary files from %s", old_directory)
+	return _old_directories_checked[old_directory]
+
+
+def _back_up_new_old_files(paths, old_directory):
+	names = _dic_names(old_directory)
 	if not names:
 		return
-	partial = legacy_directory + ".partial"
+	if not os.path.isdir(paths.legacy):
+		_copy_files(old_directory, names, paths.legacy)
+		return
+	backups = [paths.legacy, *_later_backups(paths, pending=False)]
+	# This runs at every start, before the engine. Every copy is made with copy2, which keeps the
+	# times, so equal names, sizes and times are taken as the same files without reading them.
+	stamps = _stamps(old_directory, names)
+	if any(_stamps(backup, _dic_names(backup)) == stamps for backup in backups):
+		return
+	content = _content_digest(old_directory, names)
+	if any(_content_digest(backup, _dic_names(backup)) == content for backup in backups):
+		return
+	number = max((int(os.path.basename(backup)) for backup in backups[1:]), default=0) + 1
+	target = os.path.join(paths.later_legacy, str(number))
+	_copy_files(old_directory, names, target)
+	log.info("Backed up old dictionary files from %s to %s", old_directory, target)
+
+
+def _dic_names(directory):
+	if not os.path.isdir(directory):
+		return []
+	return [
+		name
+		for name in sorted(os.listdir(directory))
+		if name.lower().endswith(".dic") and os.path.isfile(os.path.join(directory, name))
+	]
+
+
+def _stamps(directory, names):
+	return {name.lower(): _stamp(os.path.join(directory, name)) for name in names}
+
+
+def _content_digest(directory, names):
+	"""A digest of these files' names, without case, and contents: equal when two folders hold the same."""
+	digest = hashlib.sha256()
+	for name in sorted(names, key=str.lower):
+		digest.update(name.lower().encode("utf-8") + b"\0")
+		digest.update(hashlib.sha256(_read_file(os.path.join(directory, name))).digest())
+	return digest.hexdigest()
+
+
+def _later_backups(paths, pending):
+	"""The later backups, oldest first: only those not yet imported when pending is set."""
+	try:
+		names = os.listdir(paths.later_legacy)
+	except FileNotFoundError:
+		return []
+	backups = [os.path.join(paths.later_legacy, name) for name in sorted(filter(str.isdigit, names), key=int)]
+	if pending:
+		return [backup for backup in backups if not os.path.exists(os.path.join(backup, _IMPORTED_MARKER))]
+	return backups
+
+
+def _copy_files(source_directory, names, target_directory):
+	# Copied beside the final folder and renamed, so a copy cut short never passes for a finished one.
+	partial = target_directory + ".partial"
 	shutil.rmtree(partial, ignore_errors=True)
 	os.makedirs(partial)
 	for name in names:
 		shutil.copy2(os.path.join(source_directory, name), os.path.join(partial, name))
-	os.rename(partial, legacy_directory)
+	os.rename(partial, target_directory)
 
 
 def _files_the_old_engine_loaded(names):
@@ -573,16 +731,45 @@ def refresh(paths, provider_directories, force=False, old_dictionary_directory=N
 	version of the add-on kept its files; see import_legacy().
 	"""
 	found = _dictionary_sets.discover_sets(provider_directories, paths.sources)
-	settings = load_settings(paths)
-	# Both must run, so no short-circuit: the old files first, so new sets land below them.
-	imported = import_legacy(paths, settings, old_dictionary_directory)
-	reconciled = reconcile_sets(settings, found)
-	if imported or reconciled:
-		save_settings(paths, settings)
+	# Held from reading the selections to saving them, so a save from the dialog cannot fall between.
+	with _settings_lock:
+		try:
+			settings = load_settings(paths)
+		except SettingsUnreadable as error:
+			# Saving anything now would replace the user's selections, and rebuilding would change
+			# what they hear, so everything stays as it is until the file can be read again.
+			if _not_reported_yet(paths.settings_file, error.cause):
+				copy = _keep_unreadable_copy(paths)
+				log.error(
+					"Could not read %s, so the dictionaries stay as they are until it can be: %r%s",
+					paths.settings_file,
+					error.cause,
+					f". A copy of it is in {copy}" if copy else "",
+				)
+			return False
+		_reported.pop(paths.settings_file, None)
+		own_before = _own_files(settings)
+		try:
+			# Both must run, so no short-circuit: the old files first, so new sets land below them.
+			imported, backups = import_legacy(paths, settings, old_dictionary_directory)
+			reconciled = reconcile_sets(settings, found)
+			if imported or reconciled:
+				save_settings(paths, settings)
+		except Exception:
+			# Copies with no saved row would be imported again beside themselves next time.
+			for name in _own_files(settings) - own_before:
+				_remove_quietly(os.path.join(paths.own, name))
+			raise
+		for backup in backups:
+			_write_atomically(os.path.join(backup, _IMPORTED_MARKER), b"")
 	if not force and not is_stale(paths, settings, found):
 		return False
 	outcomes = build(paths, settings, found)
 	return any(outcome.changed for outcome in outcomes.values())
+
+
+def _own_files(settings):
+	return {row.id for language in settings.languages.values() for row in language.rows if row.kind == "own"}
 
 
 def fingerprint(paths, settings, sets):
@@ -634,10 +821,32 @@ def _write_atomically(path, data):
 	try:
 		with os.fdopen(descriptor, "wb") as f:
 			f.write(data)
-		os.replace(temporary, path)
+		# Windows refuses to replace a file another program has open without delete sharing.
+		_while_in_use(os.replace, temporary, path)
 	except BaseException:
-		try:
-			os.remove(temporary)
-		except OSError:
-			pass
+		_remove_quietly(temporary)
 		raise
+
+
+def _remove_quietly(path):
+	try:
+		os.remove(path)
+	except OSError:
+		pass
+
+
+def _read_file(path):
+	with open(path, "rb") as f:
+		return f.read()
+
+
+def _while_in_use(action, *args):
+	"""Return action(*args), trying again for a moment while Windows says the file is in use."""
+	deadline = time.monotonic() + _IN_USE_RETRY_SECONDS
+	while True:
+		try:
+			return action(*args)
+		except PermissionError:
+			if time.monotonic() >= deadline:
+				raise
+			time.sleep(_IN_USE_RETRY_INTERVAL)

@@ -69,7 +69,7 @@ def dialect_labels():
 		# Translators: A checkbox in the dictionaries dialog, shown for Latin American Spanish.
 		"esm": _("Also use C&astilian Spanish dictionaries"),
 		# Translators: A checkbox in the dictionaries dialog, shown for Canadian French.
-		"frc": _("Also use &French dictionaries"),
+		"frc": _("&Also use French dictionaries"),
 		# Translators: A checkbox in the dictionaries dialog, shown for Mandarin Chinese.
 		"chs": _("Also use &American English dictionaries for English words"),
 	}
@@ -314,6 +314,19 @@ class ManageDictionariesDialog(wx.Dialog):
 		)
 		self.languageChoice.Bind(wx.EVT_CHOICE, self.onLanguage)
 
+		# Multi-line, because wx leaves a single-line read-only field out of the Tab order. It comes
+		# straight after the language, where Tab from a language that has a problem lands on it.
+		problem_sizer = wx.BoxSizer(wx.VERTICAL)
+		# Translators: The label of a read-only field in the dictionaries dialog. It is only shown
+		# when the dictionaries of the chosen language could not be built.
+		self._problemLabelText = _("&Problem with this language:")
+		self._problemLabel = wx.StaticText(self, label=self._problemLabelText)
+		self.problemField = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP)
+		problem_sizer.Add(self._problemLabel)
+		problem_sizer.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		problem_sizer.Add(self.problemField, flag=wx.EXPAND)
+		helper.addItem(problem_sizer, flag=wx.EXPAND)
+
 		self.stackList = helper.addLabeledControl(
 			# Translators: The label of the list of dictionaries in the dictionaries dialog.
 			_("&Dictionaries for this language. Where two have the same word, the lower one wins:"),
@@ -343,15 +356,6 @@ class ManageDictionariesDialog(wx.Dialog):
 
 		self.dialectCheckBox = helper.addItem(wx.CheckBox(self, label=""))
 		self.dialectCheckBox.Bind(wx.EVT_CHECKBOX, self.onDialect)
-
-		self.problemField = helper.addLabeledControl(
-			# Translators: The label of a read-only field in the dictionaries dialog. It is only shown
-			# when the dictionaries of the chosen language could not be built.
-			_("&Problem with this language:"),
-			wx.TextCtrl,
-			style=wx.TE_READONLY,
-		)
-		self._problemLabel = self.problemField.GetPrevSibling()
 
 		sources_box = wx.StaticBoxSizer(
 			# Translators: The label of a group of controls in the dictionaries dialog.
@@ -401,16 +405,28 @@ class ManageDictionariesDialog(wx.Dialog):
 
 	def _refresh_language(self):
 		"""Show the chosen language: its stack, its dialect setting and any build problem."""
+		# Each language says in the list whether it has a problem, so it is heard while choosing.
+		for index, code in enumerate(self._languages):
+			name = self._language_names[code]
+			if self.manager.build_error(code) is not None:
+				# Translators: A language in the dictionaries dialog whose dictionaries could not be
+				# built. The problem is explained in the field after the list of languages.
+				name = _("{language}, has a problem").format(language=name)
+			if self.languageChoice.GetString(index) != name:
+				self.languageChoice.SetString(index, name)
 		self._refresh_stack()
 		language = self.language
 		labels = dialect_labels()
 		self.dialectCheckBox.Show(language in labels)
+		# Hidden, it has no label, because a hidden control's access key still presses it.
+		self.dialectCheckBox.SetLabel(labels.get(language, ""))
 		if language in labels:
-			self.dialectCheckBox.SetLabel(labels[language])
 			self.dialectCheckBox.SetValue(self.manager.uses_dialect_base(language))
 		error = self.manager.build_error(language)
 		self.problemField.Show(error is not None)
 		self._problemLabel.Show(error is not None)
+		# Hidden, it has no label, because a hidden label's access key still moves focus.
+		self._problemLabel.SetLabel(self._problemLabelText if error is not None else "")
 		if error is not None:
 			self.problemField.SetValue(self._describe_build_error(language, error))
 		self.Layout()
