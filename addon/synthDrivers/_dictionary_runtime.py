@@ -97,14 +97,25 @@ def apply_changes():
 
 
 def reload_synth():
-	"""Reload the Synth Driver so the engine reads the rebuilt files. Safe to call from any thread."""
+	"""Reload the Synth Driver so the engine reads the rebuilt files. Safe to call from any thread.
+
+	Whatever is being spoken is cancelled first. setSynth() replaces the driver but leaves NVDA's
+	speech manager as it was, still waiting for the old driver to report the indexes of what it
+	was speaking. Those never come, since the manager ignores a driver that is no longer the
+	current one, so Say All stops and everything spoken afterwards waits in the queue unheard
+	until a key press cancels speech. Measured in NVDA 2026.3: Say All read a line every 1.5
+	seconds, a dictionary entry was saved, and nothing more was spoken. NVDA's own change of
+	synthesizer on a profile switch cancels speech first for the same reason.
+	"""
 	import wx
 
 	def reload():
+		import speech
 		import synthDriverHandler
 
 		synth = synthDriverHandler.getSynth()
 		if synth is not None and synth.name == SYNTH_NAME:
+			speech.cancelSpeech()
 			synthDriverHandler.setSynth(synth.name)
 
 	wx.CallAfter(reload)
