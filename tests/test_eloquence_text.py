@@ -33,6 +33,30 @@ class EloquenceTextBuilderTests(unittest.TestCase):
 
 		self.assertEqual(built, b"`pp1 `da1 `vv77 Hello")
 
+	def test_greek_goes_in_as_code_page_1253_whatever_the_system_has(self):
+		# On a Western system the system code page has no Greek, and every
+		# letter used to arrive as "?".
+		built = _eloquence_text.build("Καλημέρα κόσμε", 0x120000, self._options())
+
+		self.assertEqual(built, "`pp0 `da0 `vv80 Καλημέρα κόσμε".encode("cp1253"))
+
+	def test_a_letter_greek_lacks_is_fitted_to_its_code_page(self):
+		built = _eloquence_text.build("café", 0x120000, self._options())
+
+		self.assertEqual(built, b"`pp0 `da0 `vv80 cafe")
+
+	def test_aragonese_goes_in_as_code_page_1252(self):
+		built = _eloquence_text.build("añada l'aragonés", 0x130000, self._options())
+
+		self.assertEqual(built, "`pp0 `da0 `vv80 añada l'aragonés".encode("cp1252"))
+
+	def test_polish_goes_in_as_utf_8_with_its_letters_whole(self):
+		# The system code page fitted them to the nearest Western letter: l for
+		# l with stroke, and so on.
+		built = _eloquence_text.build("Zażółć gęślą jaźń", 0x110000, self._options())
+
+		self.assertEqual(built, "`pp0 `da0 `vv80 Zażółć gęślą jaźń".encode("utf-8"))
+
 	def test_pause_policy_injection(self):
 		expected = {
 			0: b"`pp0 `da0 `vv80 Hello `p0, world `p0!",

@@ -73,18 +73,25 @@ scons.bat
 The add-on can reach an Eloquence Engine two ways, selected by the "64-bit engine" choice in the Eloquence settings category (`config.conf["eloquence"]["direct_engine"]`: `none`, `openevv` or `reloq`; an older config's `use_openevv` checkbox still counts as `openevv`):
 
 - **Eloquence Host Process (32-bit)**: `host_eloquence32.py`, compiled to the `eloquence_host32/` onedir tree. Loads the proprietary `ECI.DLL`, which is 32-bit only, and talks to NVDA over the **Host Channel**. Supports all 13 languages.
-- **Direct Backend (in-process, 64-bit)**: loads openevv's 64-bit `eci.dll` inside NVDA itself. No process, no IPC. openevv supports **US English only** so far. Published releases take openevv's newest release (v0.4 is the first with the `eciStop` fix); every other build, local or CI, takes openevv's newest CI artifact so an upstream change shows up before a release ships it. See `fetch_eci.py`.
+- **Direct Backend (in-process, 64-bit)**: loads openevv's 64-bit `eci.dll` inside NVDA itself. No process, no IPC. openevv's coverage is narrower than the proprietary engine's (`main@7ffd7549` reports 11 of the 13, lacking Mandarin and Korean) and it adds Polish. Published releases take openevv's newest release (v0.4 is the first with the `eciStop` fix); every other build, local or CI, takes openevv's newest CI artifact so an upstream change shows up before a release ships it. See `fetch_eci.py`.
 
 Because openevv's language coverage is narrower, both backends can be live at once: a Voice Identity openevv reports is spoken in process, and anything else falls back to the Eloquence Host Process. The available set is read from `eciGetAvailableLanguages` at run time, never hardcoded, so an openevv release that adds a language starts serving it with no code change here. An empty or failed enumeration degrades to host-only rather than to silence.
 
 The Eloquence Host Process is started lazily, so a user who only speaks a language openevv has never spawns it.
+
+**Direct-Only Voices** (`_eci_engine.DIRECT_ONLY_VOICES`) are the Voice IDs the proprietary engine does not have: openevv's Polish (`0x110000`), and ReLoq C's Greek (`0x120000`) and Aragonese (`0x130000`). They have no `.syn` file, so the voice list adds each one only in a session whose in-process engine reports it (`_eloquence.voice_available()`), and automatic language switching resolves to one only then. What is easy to break:
+- **It is a table, not whatever the engine reports.** A voice needs a name, a language tag and an encoding, and no ECI call reports the encoding. ReLoq C also reports `0x60001` (traditional Chinese), which its own add-on does not offer and neither does this. Adding a voice is one row.
+- **Each has its own text encoding, never the system code page** (`_text_preprocessing.code_page_for()`). Measured: Greek sent as cp1253 speaks, and in a Western system's cp1252 every letter is `?` and the engine is silent. Polish is the one language openevv converts from UTF-8 itself, so its code page is 65001: the pangram is 15873 samples as UTF-8 against 122881 of symbol names as cp1250.
+- **They are kept out of `LANGS`**, which is the proprietary engine's set and what gets a Dictionary Stack. They are in `VOICE_IDS` and `LANG_BY_ID`, so the engine looks for `ell*.dic` and finds none. Before that an unknown Voice ID fell back to `enu` and Greek would have been read through the English dictionaries.
+- **A saved Direct-Only Voice the session's engine lacks falls back to American English** in `_set_voice()`. Routing it would send it to the Eloquence Host Process, which has no such language, along with text encoded for it.
+- The Pause Policy's commands go only after ASCII letters and digits (`pause_re`), so they are rarely placed in Greek. Measured on ReLoq C 2.0, placing them by hand does not change the length of Greek speech, so nothing is lost.
 
 **ReLoq C** ([hozosch/Reloq-C](https://github.com/hozosch/Reloq-C)) is the Direct Backend's other engine, and covers all 13 languages, so with it chosen the host is never started. It is an independent C engine with a 64-bit `eci.dll`, and **from 1.1 it is driven exactly like openevv**, through the standard ECI calls alone, with no adapter. 1.0.1 needed one (`EngineConfig.reloq`, removed): no voice-parameter calls, one handle per language, UTF-8-only text, `eciInsertPitch` for the capital-letter raise, its own dictionary call, and fragments without `` `vv ``. Each of those was re-measured on 1.1.1 before the adapter went, and `tests/test_reloq_engine.py` pins them against the real DLL (64-bit Python):
 - `eciSetVoiceParam`/`eciGetVoiceParam`/`eciCopyVoice` exist and work; preset 2 loads Shelly's values. `eciCopyVoice` resets rate to 50, which `_set_variant()` already re-applies.
 - `eciSetParam(9)` switches language on a live handle, giving audio identical to a fresh handle for that language.
 - `eciAddText` takes the per-language Engine Encodings: cp1252, cp932, gb18030 and cp949 text all produce audio identical to `eciAddTextUtf8`.
 - `ECI_INPUT_TYPE` turns on backquote commands; the generic voice is on by default.
-- `eciGetAvailableLanguages` reports 15 Voice IDs, every one in `LANGS` among them.
+- `eciGetAvailableLanguages` reports 16 Voice IDs on 2.0, every one in `LANGS` among them.
 - A voice change between `eciAddText` calls applies from that point (hozosch/Reloq-C#6): NVDA's capital-letter raise is heard, and a mid-utterance rate or volume change takes effect there.
 - An inline `` `vv ``/`` `vs `` opening a later fragment adds no pause (#5): `Alt+` then `` `vv100 a `` measures identical to `Alt+` then `a`.
 - Volume works across its whole range in every language (#2), not only 80-100.
@@ -334,3 +341,5 @@ When adding language support:
 - Add encoding to `LANG_ENCODINGS` if it's a multi-byte language
 - Add the language to `LANGUAGES` in `addon/synthDrivers/_dictionary_library.py` so it gets a Dictionary Stack (`tests/test_dictionary_library.py` fails until the two tables agree), and to `language_names()` in `_dictionary_dialog.py`
 - Place `.syn` and ROM DLL files in `addon/synthDrivers/eloquence/`
+
+A language only a 64-bit engine has is one row in `DIRECT_ONLY_VOICES` instead, with its encoding measured against the real DLL, and none of the above.
