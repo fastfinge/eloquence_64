@@ -48,6 +48,8 @@ def _load_client_module():
 ENU = 65536
 DEU = 262144
 JPN = 524288
+GREEK = 0x120000
+ARAGONESE = 0x130000
 
 
 class _FakeBackend:
@@ -163,6 +165,28 @@ class BackendRoutingTests(unittest.TestCase):
 
 	def test_openevv_languages_are_reported_as_the_engine_gave_them(self):
 		self.assertEqual(self.module.direct_languages(), frozenset({ENU}))
+
+
+	def test_a_direct_only_voice_is_available_only_where_the_engine_reports_it(self):
+		# Greek and Aragonese have no .syn file: the host cannot speak them.
+		self.assertFalse(self.module.voice_available(GREEK))
+		self.assertFalse(self.module.voice_available(str(ARAGONESE)))
+		self.module._direct_languages = frozenset({ENU, GREEK})
+		self.assertTrue(self.module.voice_available(GREEK))
+		self.assertTrue(self.module.voice_available(str(GREEK)))
+		self.assertFalse(self.module.voice_available(ARAGONESE))
+		self.assertIs(self.module.backend_for_voice(GREEK), self.direct)
+
+	def test_the_proprietary_voices_are_always_available(self):
+		self.module._direct_languages = frozenset()
+		for voice in (ENU, DEU, JPN, str(ENU)):
+			with self.subTest(voice=voice):
+				self.assertTrue(self.module.voice_available(voice))
+
+	def test_an_unparsable_voice_id_is_not_available(self):
+		for voice in (None, "not-a-voice"):
+			with self.subTest(voice=voice):
+				self.assertFalse(self.module.voice_available(voice))
 
 
 class BackendActivationTests(unittest.TestCase):

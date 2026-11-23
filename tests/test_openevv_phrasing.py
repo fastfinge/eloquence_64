@@ -35,6 +35,7 @@ from addon.synthDrivers import _eloquence_text
 
 _REAL_DLL = Path(__file__).parents[1] / "addon" / "synthDrivers" / "openevv" / "eci.dll"
 ENU = engine.LANGS["enu"]
+POLISH = engine.VOICE_IDS["plk"]
 FIRST = "The committee reviewed the proposal carefully and"
 SECOND = "decided that the new budget should be approved next week."
 
@@ -95,6 +96,66 @@ class SplitSentenceTests(unittest.TestCase):
 		whole = self._samples([(FIRST + " " + SECOND, True)])
 		split = self._samples([(FIRST, True), (SECOND, True)])
 		self.assertGreater(split, whole + self.engine.sample_rate // 10)
+
+
+@unittest.skipUnless(
+	_REAL_DLL.exists() and struct.calcsize("P") == 8,
+	"needs the fetched openevv engine and 64-bit Python",
+)
+class PolishTests(unittest.TestCase):
+	"""Polish, the one openevv language the proprietary engine lacks.
+
+	It is also the one whose text openevv converts from UTF-8 itself, so it is
+	sent as UTF-8 and not in a code page.
+	"""
+
+	PANGRAM = "Zażółć gęślą jaźń"
+
+	def setUp(self):
+		if POLISH not in engine.available_languages(str(_REAL_DLL)):
+			self.skipTest("this openevv build has no Polish")
+		self.events = []
+		config = engine.EngineConfig(
+			eci_path=str(_REAL_DLL),
+			data_directory="",
+			language_code="plk",
+			enable_abbrev_dict=False,
+			enable_phrase_prediction=False,
+			voice_variant=1,
+			rewrite_ini=False,
+			wideband=True,
+		)
+		self.engine = engine.EciEngine(lambda event, **payload: self.events.append((event, payload)), config)
+		self.engine.start()
+		self.addCleanup(self.engine.delete)
+		self.options = _eloquence_text.BuildOptions(
+			volume=80,
+			rate=50,
+			pause_mode=1,
+			backquote_tags=False,
+			abbreviation_dict=False,
+			phrase_prediction=False,
+			openevv_bracket_fixes=True,
+		)
+
+	def _samples(self, text_bytes):
+		self.events.clear()
+		self.engine.add_text(text_bytes)
+		self.engine.synthesize()
+		pcm = array.array("h")
+		pcm.frombytes(b"".join(payload["data"] for event, payload in self.events if event == "audio"))
+		return len(pcm)
+
+	def test_the_engine_starts_in_polish(self):
+		self.assertEqual(self.engine.get_state()["params"][engine.ECI_LANGUAGE_PARAM], POLISH)
+
+	def test_its_letters_are_read_as_letters(self):
+		built = _eloquence_text.build(self.PANGRAM, POLISH, self.options)
+		spoken = self._samples(built)
+		self.assertGreater(spoken, 0)
+		# In a code page each letter of its own is a symbol, named at length.
+		named = self._samples(b"`pp0 `da0 `vv80 " + self.PANGRAM.encode("cp1250"))
+		self.assertGreater(named, spoken * 3)
 
 
 if __name__ == "__main__":

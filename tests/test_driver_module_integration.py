@@ -212,6 +212,11 @@ def _install_nvda_stubs():
 	return previous, config_module
 
 
+POLISH = str(0x110000)
+GREEK = str(0x120000)
+ARAGONESE = str(0x130000)
+
+
 class _RecordingBackend:
 	"""Accepts Host Commands without an engine behind them."""
 
@@ -361,6 +366,59 @@ class DriverAgainstRealModuleTests(unittest.TestCase):
 		before = self.eloquence.current_generation()
 		self.eloquence.stop()
 		self.assertGreater(self.eloquence.current_generation(), before)
+
+	def test_a_direct_only_voice_is_listed_only_when_the_engine_reports_it(self):
+		driver = self._new_driver()
+		for voice in (POLISH, GREEK, ARAGONESE):
+			self.assertNotIn(voice, driver._getAvailableVoices())
+
+		# What ReLoq C reports, and then what openevv does.
+		self.eloquence._direct_languages = frozenset({65536, int(GREEK), int(ARAGONESE)})
+		voices = driver._getAvailableVoices()
+		self.assertEqual(voices[GREEK].displayName, "Greek")
+		self.assertEqual(voices[ARAGONESE].displayName, "Aragonese")
+		self.assertNotIn(POLISH, voices)
+
+		self.eloquence._direct_languages = frozenset({65536, int(POLISH)})
+		voices = driver._getAvailableVoices()
+		self.assertEqual(voices[POLISH].displayName, "Polish")
+		self.assertNotIn(GREEK, voices)
+
+	def test_a_language_reported_without_a_name_here_is_not_listed(self):
+		# ReLoq C reports traditional Chinese, which has no entry in the table.
+		driver = self._new_driver()
+		before = set(driver._getAvailableVoices())
+		self.eloquence._direct_languages = frozenset({65536, 0x60001})
+		self.assertEqual(set(driver._getAvailableVoices()), before)
+
+	def test_greek_text_switches_to_greek_only_when_the_engine_has_it(self):
+		driver = self._new_driver()
+		for tag in ("el", "el-GR", "el_GR"):
+			with self.subTest(tag=tag):
+				self.assertIsNone(driver._resolve_voice_for_language(tag))
+		self.eloquence._direct_languages = frozenset({65536, int(GREEK), int(ARAGONESE)})
+		for tag in ("el", "el-GR", "el_GR"):
+			with self.subTest(tag=tag):
+				self.assertEqual(driver._resolve_voice_for_language(tag), GREEK)
+		self.assertEqual(driver._resolve_voice_for_language("an"), ARAGONESE)
+		self.assertIsNone(driver._resolve_voice_for_language("pl"))
+		# Aragonese is not a kind of Spanish, and Spanish is still Spanish.
+		self.assertEqual(driver._resolve_voice_for_language("es-ES"), "131072")
+
+	def test_a_saved_voice_this_engine_lacks_falls_back_to_american_english(self):
+		# Greek chosen under ReLoq C, then the engine changed.
+		driver = self._new_driver()
+		driver._set_voice(GREEK)
+		self.assertEqual(driver._get_voice(), "65536")
+		self.assertIn(("setParam", {"paramId": 9, "value": 65536}), self.backend.commands)
+		self.assertNotIn(("setParam", {"paramId": 9, "value": int(GREEK)}), self.backend.commands)
+
+	def test_a_voice_the_engine_has_is_selected(self):
+		driver = self._new_driver()
+		self.eloquence._direct_languages = frozenset({65536, int(GREEK)})
+		driver._set_voice(GREEK)
+		self.assertEqual(driver._get_voice(), GREEK)
+		self.assertIn(("setParam", {"paramId": 9, "value": int(GREEK)}), self.backend.commands)
 
 	def test_the_reloq_c_timing_setting_is_offered_only_with_reloq_c(self):
 		# It means nothing to the other engines, whose users would otherwise be

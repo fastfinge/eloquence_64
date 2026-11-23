@@ -28,6 +28,7 @@ import array
 import os
 import statistics
 import struct
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -38,6 +39,7 @@ from addon.synthDrivers import _eloquence_text
 ENU = engine.LANGS["enu"]
 DEU = engine.LANGS["deu"]
 JPN = engine.LANGS["jpn"]
+GREEK = engine.VOICE_IDS["ell"]
 
 _REAL_DLL = Path(__file__).parents[1] / "addon" / "synthDrivers" / "reloq" / "eci.dll"
 # The add-on's own dictionaries are fetched by Dictionary Update rather than
@@ -153,6 +155,40 @@ class RealEngineTests(unittest.TestCase):
 				self.engine.set_param(engine.ECI_LANGUAGE_PARAM, voice_id)
 				pcm, _indexes = self._speak("1 2 3.")
 				self.assertGreater(len(pcm), 0)
+
+	def test_it_speaks_the_voices_the_proprietary_engine_lacks(self):
+		languages = engine.available_languages(str(_REAL_DLL))
+		samples = {"ell": "Καλημέρα κόσμε, τι κάνεις;", "ara": "Buen diya, añada l'aragonés."}
+		for code, text in samples.items():
+			voice = engine.DIRECT_ONLY_BY_ID[engine.VOICE_IDS[code]]
+			with self.subTest(language=code):
+				self.assertIn(voice.voice_id, languages)
+				self.engine.set_param(engine.ECI_LANGUAGE_PARAM, voice.voice_id)
+				self.assertEqual(self.engine._config.language_code, code)
+				pcm, _indexes = self._speak(text)
+				self.assertGreater(len(pcm), 0)
+
+	def test_greek_needs_its_own_code_page(self):
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, GREEK)
+		text = "Καλημέρα κόσμε"
+		spoken, _ = self._speak(text)
+		direct, _ = self._speak(b"`pp0 `da0 `vv100 " + text.encode("cp1253"))
+		self.assertEqual(spoken, direct)
+		# What a Western system's own code page made of it: nothing at all.
+		replaced, _ = self._speak(text.encode("cp1252", errors="replace"))
+		self.assertEqual(len(replaced), 0)
+
+	def test_a_voice_with_no_dictionaries_is_unchanged_by_a_dictionary_folder(self):
+		self.engine.set_param(engine.ECI_LANGUAGE_PARAM, GREEK)
+		plain, _ = self._speak("Καλημέρα κόσμε")
+		with tempfile.TemporaryDirectory() as folder:
+			self.engine = self._start(data_directory=folder)
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, GREEK)
+			self.assertEqual(self._speak("Καλημέρα κόσμε")[0], plain)
+			# And still after leaving the language and coming back.
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, ENU)
+			self.engine.set_param(engine.ECI_LANGUAGE_PARAM, GREEK)
+			self.assertEqual(self._speak("Καλημέρα κόσμε")[0], plain)
 
 	def test_a_language_change_keeps_the_handle(self):
 		handle = self.engine._handle

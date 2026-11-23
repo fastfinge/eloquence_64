@@ -52,6 +52,10 @@ _Avoid_: ReLoq, Reloq, reloqC, the C engine
 The set of Voice Identities an Eloquence Engine reports it can create, read from the engine at speech-driver start rather than hardcoded. A Voice Identity outside the Direct Backend's coverage is served by the Eloquence Host Process instead.
 _Avoid_: supported languages, available languages, language list
 
+**Direct-Only Voice**:
+A Voice Identity the proprietary Eloquence Engine does not have, such as openevv's Polish or ReLoq C's Greek and Aragonese. It is offered only when the Direct Backend's Engine Language Coverage includes it, has no Dictionary Stack, and is never served by the Eloquence Host Process.
+_Avoid_: extra language, new language, 64-bit language
+
 **Engine Fallback**:
 Routing a Voice Identity to the Eloquence Host Process because it lies outside the Direct Backend's Engine Language Coverage. Both Engine Backends may be running at once for this reason.
 _Avoid_: fallback, degradation, failover

@@ -85,9 +85,10 @@ def _engine_encode(text: str, voice_id) -> bytes:
 	encoding = _ENGINE_ENCODINGS.get(voice_id)
 	if encoding is not None:
 		return text.encode(encoding, errors="replace")
-	text_bytes = _text_preprocessing._wchar_to_mbcs(text)
+	code_page = _text_preprocessing.code_page_for(voice_id)
+	text_bytes = _text_preprocessing._wchar_to_mbcs(text, code_page)
 	if text_bytes is None:
-		text_bytes = text.encode("mbcs", errors="replace")
+		text_bytes = text.encode(f"cp{code_page}" if code_page else "mbcs", errors="replace")
 	return text_bytes
 
 

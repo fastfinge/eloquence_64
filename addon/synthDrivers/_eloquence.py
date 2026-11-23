@@ -1039,6 +1039,22 @@ def direct_languages() -> frozenset:
 	return _direct_languages
 
 
+def voice_available(voice_id) -> bool:
+	"""Whether this session can speak *voice_id* at all.
+
+	False only for a voice the proprietary engine does not have (Polish, Greek,
+	Aragonese) in a session whose in-process engine does not report it either.
+	Routing such a voice would send it to the Eloquence Host Process, which has
+	no such language, along with text encoded for it.  Says nothing about the
+	proprietary voices, whose .syn files decide.
+	"""
+	try:
+		numeric_voice = int(voice_id)
+	except (TypeError, ValueError):
+		return False
+	return numeric_voice not in _engine.DIRECT_ONLY_BY_ID or numeric_voice in _direct_languages
+
+
 def backend_for_voice(voice_id) -> EngineClient:
 	"""Pick the backend that can speak *voice_id*.
 
@@ -1184,8 +1200,11 @@ langs = {
 	"eng": (65537, "British English"),
 	"chs": (393216, "Mandarin Chinese"),  # 0x00060000
 	"jpn": (524288, "Japanese"),  # 0x00080000
-	"kor": (655360, "Korean"),
-}  # 0x000A0000
+	"kor": (655360, "Korean"),  # 0x000A0000
+}
+# Voices only a Direct Backend engine has.  Named here so the driver's tables
+# know them; offered only where voice_available() says the engine has them.
+langs.update({voice.code: (voice.voice_id, voice.name) for voice in _engine.DIRECT_ONLY_VOICES})
 
 
 def _ascii_safe_dir(directory):
@@ -1384,7 +1403,7 @@ def initialize(indexCallback=None):
 
 	# Start on whichever backend owns the configured voice, so an English-only
 	# user never spawns the Eloquence Host Process at all.
-	initial_voice = _engine.LANGS.get(payload["language"], _engine.LANGS["enu"])
+	initial_voice = _engine.VOICE_IDS.get(payload["language"], _engine.LANGS["enu"])
 	_active = backend_for_voice(initial_voice)
 	_active.ensure_started()
 	active_payload = payload

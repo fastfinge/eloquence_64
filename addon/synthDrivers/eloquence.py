@@ -63,6 +63,7 @@ from synthDriverHandler import (
 	synthDoneSpeaking,
 )
 from . import _dictionary_runtime
+from . import _eci_engine
 from . import _eloquence
 from . import _eloquence_text
 from ._background_work import BackgroundWork
@@ -91,6 +92,7 @@ VOICE_BCP47 = {
 	"jpn": "ja-JP",  # Japanese
 	"kor": "ko-KR",  # Korean
 }
+VOICE_BCP47.update({voice.code: voice.language_tag for voice in _eci_engine.DIRECT_ONLY_VOICES})
 
 VOICE_CODE_TO_ID = {code: str(info[0]) for code, info in _eloquence.langs.items()}
 VOICE_ID_TO_BCP47 = {
@@ -965,12 +967,23 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			info = _eloquence.langs[voice_code]
 			language = VOICE_BCP47.get(voice_code)
 			o[str(info[0])] = synthDriverHandler.VoiceInfo(str(info[0]), info[1], language)
+		# The voices with no .syn file: the ones only a 64-bit engine has, when
+		# the engine in use reports them.
+		for voice in _eci_engine.DIRECT_ONLY_VOICES:
+			if _eloquence.voice_available(voice.voice_id):
+				voice_id = str(voice.voice_id)
+				o[voice_id] = synthDriverHandler.VoiceInfo(voice_id, voice.name, voice.language_tag)
 		return o
 
 	def _get_voice(self):
 		return getattr(self, "_defaultVoice", str(_eloquence.params[9]))
 
 	def _set_voice(self, vl):
+		if not _eloquence.voice_available(vl):
+			# A voice only a 64-bit engine has (Greek under ReLoq C, say), saved
+			# and then loaded in a session whose engine does not have it.
+			log.warning("Eloquence voice %s is not available with this engine; using American English", vl)
+			vl = VOICE_CODE_TO_ID["enu"]
 		_eloquence.set_voice(vl)
 		self._update_voice_state(vl, update_default=True)
 
@@ -991,7 +1004,7 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			return getattr(self, "_defaultVoice", None)
 		normalized = language.lower().replace("_", "-")
 		voice_id = LANGUAGE_TO_VOICE_ID.get(normalized)
-		if voice_id:
+		if voice_id and _eloquence.voice_available(voice_id):
 			return voice_id
 		primary, _, region = normalized.partition("-")
 		default_voice = getattr(self, "_defaultVoice", None)
@@ -1000,7 +1013,11 @@ class SynthDriver(synthDriverHandler.SynthDriver):
 			default_primary, _, default_region = default_lang.lower().partition("-")
 			if default_primary == primary and (not region or default_region == region):
 				return default_voice
-		candidates = PRIMARY_LANGUAGE_TO_VOICE_IDS.get(primary, [])
+		candidates = [
+			candidate
+			for candidate in PRIMARY_LANGUAGE_TO_VOICE_IDS.get(primary, [])
+			if _eloquence.voice_available(candidate)
+		]
 		if not candidates:
 			return None
 		if region:

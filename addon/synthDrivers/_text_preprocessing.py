@@ -10,6 +10,7 @@ import ctypes
 import re
 import unicodedata
 
+from . import _eci_engine
 from ._script_conversion import convert_traditional_to_simplified
 
 
@@ -157,6 +158,15 @@ _GERMAN_IDS = (262144,)  # deu
 _CHINESE_ID = (393216,)  # chs
 _KOREAN_ID = (655360,)  # kor
 _ASIAN_IDS = (393216, 524288, 655360)  # chs, jpn, kor
+# The code page a voice's text is fitted to and encoded in, where that is not
+# the system's own.  Greek has to be: on a Western system the system code page
+# has no Greek letters, and every one of them became "?".
+_CODE_PAGES = {voice.voice_id: voice.code_page for voice in _eci_engine.DIRECT_ONLY_VOICES}
+
+
+def code_page_for(voice_id):
+	"""The Windows code page *voice_id* takes its text in; 0 is the system's."""
+	return _CODE_PAGES.get(voice_id, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -193,32 +203,33 @@ def _wchar_to_mbcs(text, code_page=0):
 	return buf.raw
 
 
-def _normalize_text(s):
-	"""Normalize text to fit the active MBCS code page.
+def _normalize_text(s, code_page=0):
+	"""Normalize text to fit a code page, the system's unless one is named.
 
 	Uses Windows best-fit character mapping via ``WideCharToMultiByte`` so
 	that characters like Đ and ł are mapped to their closest equivalents
 	(D, l) instead of being replaced with ``?``.
 	"""
-	encoded = _wchar_to_mbcs(s)
+	codec = f"cp{code_page}" if code_page else "mbcs"
+	encoded = _wchar_to_mbcs(s, code_page)
 	if encoded is not None:
 		try:
-			return encoded.decode("mbcs")
+			return encoded.decode(codec)
 		except UnicodeDecodeError:
 			pass
 	# Fallback: per-character approach (should rarely trigger)
 	result = []
 	for c in s:
-		char_bytes = _wchar_to_mbcs(c)
+		char_bytes = _wchar_to_mbcs(c, code_page)
 		if char_bytes is not None:
 			try:
-				result.append(char_bytes.decode("mbcs"))
+				result.append(char_bytes.decode(codec))
 				continue
 			except UnicodeDecodeError:
 				pass
 		cc = _strip_accents(c)
 		try:
-			cc.encode("mbcs")
+			cc.encode(codec)
 		except UnicodeEncodeError:
 			cc = "?"
 		result.append(cc)
@@ -256,5 +267,5 @@ def preprocess(text, voice_id):
 		text = convert_traditional_to_simplified(text)
 	# Asian languages use multi-byte characters that would be corrupted
 	if voice_id not in _ASIAN_IDS:
-		text = _normalize_text(text)
+		text = _normalize_text(text, code_page_for(voice_id))
 	return text

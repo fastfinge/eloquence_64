@@ -13,6 +13,22 @@ For development scenarios where the prebuilt Eloquence Host Process executable i
 the `ELOQUENCE_HOST_COMMAND` environment variable can be set to the command that
 launches a compatible 32-bit Python interpreter with `host_eloquence32.py`.
 
+## Languages only the 64-bit engines have
+
+The 64-bit engines speak a few languages the original Eloquence never had. When
+the engine you chose has one, it appears in NVDA's voice list beside the others,
+and NVDA's automatic language switching uses it:
+
+| Language | Engine |
+| --- | --- |
+| Polish | openevv |
+| Greek | ReLoq C |
+| Aragonese | ReLoq C |
+
+These voices exist only while that engine is the one in use. If you pick one and
+later change engine, the voice goes back to American English. They have no
+pronunciation dictionaries in this add-on yet.
+
 ## Audio contours
 
 The **Audio contour** setting in NVDA's Speech settings shapes Eloquence's audio

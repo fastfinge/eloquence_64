@@ -226,7 +226,42 @@ LANGS: Dict[str, int] = {
 	"jpn": 524288,  # Japanese (0x00080000)
 	"kor": 655360,  # Korean (0x000A0000)
 }
-LANG_BY_ID: Dict[int, str] = {voice_id: language_code for language_code, voice_id in LANGS.items()}
+
+
+@dataclass(frozen=True)
+class DirectOnlyVoice:
+	"""A Voice ID the proprietary engine does not have, so only a Direct Backend engine can speak it."""
+
+	code: str
+	voice_id: int
+	name: str
+	language_tag: str
+	# The Windows code page its eciAddText takes; 65001 is UTF-8.
+	code_page: int
+
+
+# Offered only in a session whose in-process engine reports the Voice ID, and
+# kept out of LANGS because nothing here builds a Dictionary Stack for them.
+#
+# A table and not simply whatever eciGetAvailableLanguages reports, because a
+# voice needs a name, a language tag and above all an encoding, which no ECI
+# call reports.  ReLoq C also reports 0x60001, traditional Chinese, which its
+# own add-on does not offer as a voice and neither does this.
+#
+# The encodings are measured.  ReLoq C 2.0 (codex/release-2.0-no-persian@021e08cc):
+# Greek sent as cp1253 speaks, and sent in a Western system's cp1252 is silence.
+# openevv main@7ffd7549: Polish is the one language it converts from UTF-8
+# itself (its docs/quirks.md), and "Zażółć gęślą jaźń" is 15873 samples as
+# UTF-8 against 122881 of symbol names as cp1250.
+DIRECT_ONLY_VOICES = (
+	DirectOnlyVoice("plk", 0x110000, "Polish", "pl-PL", 65001),
+	DirectOnlyVoice("ell", 0x120000, "Greek", "el-GR", 1253),
+	DirectOnlyVoice("ara", 0x130000, "Aragonese", "an-ES", 1252),
+)
+DIRECT_ONLY_BY_ID: Dict[int, DirectOnlyVoice] = {voice.voice_id: voice for voice in DIRECT_ONLY_VOICES}
+# Every Voice ID with a language code, LANGS and the direct-only voices alike.
+VOICE_IDS: Dict[str, int] = {**LANGS, **{voice.code: voice.voice_id for voice in DIRECT_ONLY_VOICES}}
+LANG_BY_ID: Dict[int, str] = {voice_id: language_code for language_code, voice_id in VOICE_IDS.items()}
 
 # Voice parameters re-read from the engine whenever the voice or variant changes.
 _VOICE_PARAMS = (RATE, PITCH, VLM, FLUCTUATION, HSZ, RGH, BTH)
@@ -445,7 +480,7 @@ class EciEngine:
 		self._dll = ctypes.windll.LoadLibrary(self._config.eci_path)
 		self._declare_signatures()
 
-		language_id = LANGS.get(self._config.language_code, LANGS["enu"])
+		language_id = VOICE_IDS.get(self._config.language_code, LANGS["enu"])
 		handle = self._dll.eciNewEx(language_id)
 		if not handle:
 			raise RuntimeError(

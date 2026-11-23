@@ -103,6 +103,18 @@ class EngineContractTests(unittest.TestCase):
 			with self.subTest(code=code):
 				self.assertEqual(self.engine.LANG_BY_ID[voice_id], code)
 
+	def test_the_direct_only_voices_are_separate_from_the_proprietary_ones(self):
+		# LANGS is the proprietary engine's set, and what gets a Dictionary
+		# Stack.  A voice only a 64-bit engine has must be in neither.
+		for voice in self.engine.DIRECT_ONLY_VOICES:
+			with self.subTest(code=voice.code):
+				self.assertNotIn(voice.code, self.engine.LANGS)
+				self.assertNotIn(voice.voice_id, self.engine.LANGS.values())
+				self.assertEqual(self.engine.VOICE_IDS[voice.code], voice.voice_id)
+				# So the engine names no other language's dictionary files for it.
+				self.assertEqual(self.engine.LANG_BY_ID[voice.voice_id], voice.code)
+				"x".encode(f"cp{voice.code_page}")
+
 	def test_the_dispatcher_knows_the_host_command_protocol(self):
 		dispatcher = self.engine.EciDispatcher(lambda *a, **k: None)
 		for command in (
