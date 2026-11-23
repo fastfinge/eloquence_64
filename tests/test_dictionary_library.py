@@ -176,6 +176,7 @@ class SettingsTests(LibraryTestCase):
 		self.settings.legacy_imported = True
 		library.save_settings(self.paths, self.settings)
 		stop, save_errors, wrong_reads, reads, saves = threading.Event(), [], [], 0, [0]
+		WANTED = 20
 
 		def save():
 			while not stop.is_set():
@@ -188,8 +189,11 @@ class SettingsTests(LibraryTestCase):
 		saver = threading.Thread(target=save)
 		saver.start()
 		try:
-			deadline = time.monotonic() + 1.5
-			while time.monotonic() < deadline:
+			# As many round trips as it takes, rather than as many as fit in a fixed second and a
+			# half: that measured the runner as much as the race, and a busy 2-core runner bought
+			# exactly twenty, so a build went red on an assertion about how fast the disk is.
+			deadline = time.monotonic() + 15
+			while min(reads, saves[0]) <= WANTED and time.monotonic() < deadline:
 				try:
 					loaded = library.load_settings(self.paths)
 				except library.SettingsUnreadable as error:
@@ -200,7 +204,7 @@ class SettingsTests(LibraryTestCase):
 		finally:
 			stop.set()
 			saver.join()
-		self.assertGreater(min(reads, saves[0]), 20)
+		self.assertGreater(min(reads, saves[0]), WANTED)
 		self.assertEqual((wrong_reads[:3], save_errors[:3]), ([], []))
 
 
