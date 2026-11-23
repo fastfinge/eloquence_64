@@ -2,12 +2,14 @@
 
 Older versions kept Pronunciation Dictionaries in synthDrivers/eloquence inside the add-on, which
 NVDA replaces on every update, so each update had to carry them across. Dictionaries now live in
-NVDA's configuration instead, and nothing is carried into the new add-on folder any more.
+NVDA's configuration instead, and this version never loads files from its own folder.
 
-What is left to do here is one copy, once: the old files go to eciDictionaries/legacy/eloquence in
+Two things are done here. The old files are copied, once, to eciDictionaries/legacy/eloquence in
 the configuration, the place a dictionary editor looks for them (EloquenceDictionaryManager ADR
-0002). The first time the synth loads after that, they are imported from there as the user's own
-files (_dictionary_library.import_legacy), so speech stays as it was.
+0002). And they are still carried into the new add-on folder, as older versions did, so that going
+back to an older version finds them there. The first time the synth loads after an update, it
+imports what no backup holds yet as the user's own files (_dictionary_library.import_legacy): the
+backup on the first update, and on a later one any files an older version gone back to has made.
 
 Kept deliberately small and self-contained: it runs from the incoming version before anything else
 of it is importable, and an exception here would fail the whole installation.
@@ -62,22 +64,25 @@ def onInstall():
 	except Exception:
 		# Losing the backup must not cost the user the update itself.
 		log.error("Could not back up the old Eloquence dictionary files", exc_info=True)
-		_carry_old_dictionaries_forward()
+	_carry_old_dictionaries_forward()
 
 
 def _carry_old_dictionaries_forward():
-	"""When the backup failed: take the old files into the new add-on folder, as updates used to.
+	"""Take the old files into the new add-on folder, as updates used to.
 
-	NVDA deletes the outgoing add-on folder at the next restart, and the old files with it. Kept in
-	the new folder they are not loaded, but the synth backs them up from there when it first starts.
+	NVDA deletes the outgoing add-on folder at the next restart, and the old files with it. In the
+	new folder they are not loaded, but an older version installed over this one carries them on
+	and uses them again, and the synth backs up from there any that no backup holds yet.
 	"""
 	try:
 		addon = addonHandler.getCodeAddon()
 		source_dir = os.path.join(addon.installPath, "synthDrivers", "eloquence")
+		if not os.path.isdir(source_dir):
+			return
 		target_dir = os.path.join(addon.path, "synthDrivers", "eloquence")
 		os.makedirs(target_dir, exist_ok=True)
 		for name in os.listdir(source_dir):
 			if name.lower().endswith(".dic") and os.path.isfile(os.path.join(source_dir, name)):
 				shutil.copy2(os.path.join(source_dir, name), os.path.join(target_dir, name))
 	except Exception:
-		log.error("Could not carry the old Eloquence dictionary files forward either", exc_info=True)
+		log.error("Could not carry the old Eloquence dictionary files forward", exc_info=True)

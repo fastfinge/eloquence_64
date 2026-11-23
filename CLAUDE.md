@@ -93,6 +93,11 @@ The Eloquence Host Process is started lazily, so a user who only speaks a langua
 
 What remains different is harmless: it refuses parameters 41/42 with `-1` (the inline `` `da ``/`` `pp `` carry them), it has no wideband (so `_direct_initialize_payload()` sends it no `wideband`), and it has none of openevv's bracket-naming bug, so neither bracket rewrite is applied. All seven sample rates are accepted on a live handle.
 
+**ReLoq C's acoustic clock** (parameter `0x101b`, `_eci_engine.RELOQ_ACOUSTIC_CLOCK`) is the one thing of its own it is sent, as the "ReLoq C timing" Speech setting: 0 is its 1 ms clock, 1 the original engine's 5 ms, 2 its own per-language choice (5 ms for Castilian Spanish and Greek). A fresh handle is on 1 ms, and **this add-on defaults to the original 5 ms**, because sounding like Eloquence 6.1 is what it is for; that differs from ReLoq C's own add-on, which defaults to the per-language choice. Measured on 1.4.1: each value changes the audio and none its length, it takes effect on a live handle, and it survives a language change and `eciCopyVoice`. Three things are easy to undo:
+- **The setting is in `supportedSettings` only when ReLoq C is the session's engine** (`_get_supportedSettings()`), so the Speech settings panel does not show the other engines' users a control that does nothing. It is still remembered when another engine is in use. It is deliberately not on the synth settings ring (`availableInSettingsRing` is left off): it is not something changed from moment to moment.
+- **A change is queued for the EloquenceSynthWorker with no Speech Generation** (`None`). The worker discards anything stamped with a cancelled generation, and NVDA cancels speech freely around a setting change, which would leave the engine on the old clock with the setting showing the new one.
+- **`EngineConfig.acoustic_clock` is `None` for the other engines, and 0 is a real choice.** Test for `None`, never truthiness.
+
 ReLoq C publishes no standalone DLL. `fetch_eci.py` takes `synthDrivers/reloqC/eci.dll` and `doc/licenses/*` out of its `.nvda-addon` into `addon/synthDrivers/reloq/` (gitignored), with `reloq-version.txt`. The update policy mirrors openevv's (`--reloq-release` on a published release), except that its CI only builds the add-on on its `codex/release*` branches with 14-day retention, so a development build falls back to its newest release when no artifact or token is available. It has been GPL-3.0-or-later since 1.1 (hozosch/Reloq-C#4); it stays out of source control because it is a fetched build output, like openevv's DLL. A checkout still holding a 1.0.x DLL needs `python fetch_eci.py --force`, since nothing here adapts to 1.0.x any more.
 
 ### Shared engine wrapper
@@ -145,6 +150,7 @@ Layout, all under NVDA's configuration so it survives add-on updates and reaches
 
 - `eciDictionaries/personal/` — the Personal Dictionary Overlay, written by a dictionary editor. Read, never written.
 - `eciDictionaries/legacy/eloquence/` — the files an older version kept in the add-on folder, written once by `installTasks.py`.
+- `eloquenceDictionaries/legacy/<n>/` — later backups of old files the first backup does not hold, made by going back to an older version and updating again. Each is imported once, then marked with `.imported`.
 - `eloquenceDictionaries/sources/<set-id>/` — downloaded Dictionary Sources, in the contract's set layout.
 - `eloquenceDictionaries/own/` — copies of Own Dictionary Files.
 - `eloquenceDictionaries/active/` — the Active Dictionaries, plus `build.json`.
@@ -171,6 +177,8 @@ Rules that are easy to break, each measured on the proprietary engine, openevv a
 - **A build must not change the settings.** `Settings.peek()` reads a language without adding it; `language()` is for editing. A build that added languages made every later staleness check rebuild.
 - **A language that cannot be built keeps its last good files**, and the others are still rebuilt.
 - **`onUninstall` must never delete either configuration folder**: NVDA runs the outgoing version's `onUninstall` on every add-on update.
+- **A `dictionaries.json` that is there but cannot be read is never treated as the defaults.** `load_settings()` raises `SettingsUnreadable`, and `refresh()` then saves and builds nothing. Every read and write of it holds `_settings_lock`, because on Windows the dialog's save and the watcher's read fail each other, and both retry a sharing violation for half a second for other programs.
+- **The installer still carries old `.dic` files into the new add-on folder**, which nothing loads, so going back to an older version finds them. The synth backs up from there only content no backup already holds.
 
 The Synth Driver reloads itself (`synthDriverHandler.setSynth`) when a rebuild changed a generated file, and only then. A rebuild that produces identical files reloads nothing.
 

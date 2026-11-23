@@ -1,15 +1,19 @@
 """The glue between NVDA and the dictionary library, with NVDA itself stubbed."""
 
+import json
 import os
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
 
 from addon.synthDrivers import _dictionary_library as library
+from addon.synthDrivers import _dictionary_manager as manager_module
 from addon.synthDrivers import _dictionary_runtime as runtime
+from tests.windows_file_locks import held_open
 
 COMMUNITY = "github.eigencrow.ibmtts-dictionaries"
 SET_INI = f"""[set]
@@ -33,6 +37,11 @@ def _write(path, data):
 
 def _lines(*lines):
 	return ("\r\n".join(lines) + "\r\n").encode("cp1252")
+
+
+def _read(path):
+	with open(path, "rb") as f:
+		return f.read()
 
 
 class RuntimeTestCase(unittest.TestCase):
@@ -130,6 +139,110 @@ class RefreshTests(RuntimeTestCase):
 		del self.app_args.configPath
 		with self.assertLogs(runtime.log, "ERROR"):
 			self.assertEqual(runtime.active_directory(), "")
+
+
+class UnreadableSettingsTests(RuntimeTestCase):
+	"""A dictionaries.json that is there but cannot be read changes nothing the user chose or hears."""
+
+	def setUp(self):
+		super().setUp()
+		library._reported.clear()
+		runtime.refresh()
+		# Two choices the defaults would undo: the installed set switched off, and no sources.
+		manager = manager_module.DictionaryManager(runtime.paths(), runtime.provider_directories())
+		manager.set_on("enu", 0, False)
+		manager.remove_source(1)
+		manager.remove_source(0)
+		manager.apply()
+		runtime.apply_changes()
+		self.saved = _read(self.paths.settings_file)
+		self.assert_unchanged()
+
+	def assert_unchanged(self, settings_file=None):
+		self.assertEqual(_read(self.paths.settings_file), settings_file or self.saved)
+		self.assertEqual(
+			[(row.id, row.on) for row in library.load_settings(self.paths).peek("enu").rows],
+			[(COMMUNITY, False)],
+		)
+		self.assertFalse(os.path.exists(os.path.join(self.paths.active, "enuroot.dic")))
+
+	def test_a_damaged_file_is_left_as_it_is_copied_once_and_logged_once(self):
+		with open(self.paths.settings_file, "r+b") as f:
+			f.truncate(40)
+		damaged = _read(self.paths.settings_file)
+		with self.assertLogs(library.log, "ERROR") as logs:
+			self.assertEqual([runtime.refresh() for _ in range(3)], [False, False, False])
+		self.assertEqual(len(logs.records), 1)
+		self.assertEqual(_read(self.paths.settings_file), damaged)
+		self.assertEqual(_read(os.path.join(self.paths.data, "dictionaries.unreadable.json")), damaged)
+		self.assertFalse(os.path.exists(os.path.join(self.paths.active, "enuroot.dic")))
+		# Repaired, everything carries on from the user's own choices.
+		_write(self.paths.settings_file, self.saved)
+		self.assertFalse(runtime.refresh())
+		self.assert_unchanged()
+
+	def test_a_row_field_from_a_later_version_changes_nothing(self):
+		data = json.loads(self.saved)
+		data["languages"]["enu"]["rows"][0]["priority"] = 3
+		_write(self.paths.settings_file, json.dumps(data))
+		newer = _read(self.paths.settings_file)
+		with self.assertNoLogs(library.log, "ERROR"):
+			self.assertFalse(runtime.refresh())
+		self.assert_unchanged(settings_file=newer)
+
+	def test_the_dialog_will_not_open_on_a_file_it_cannot_read(self):
+		_write(self.paths.settings_file, b"{ not json")
+		with self.assertRaises(library.SettingsUnreadable):
+			manager_module.DictionaryManager(runtime.paths(), runtime.provider_directories())
+		self.assertEqual(_read(self.paths.settings_file), b"{ not json")
+
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_a_file_another_program_keeps_open_is_left_alone_and_logged_once(self):
+		with self.assertLogs(library.log, "ERROR") as logs, held_open(self.paths.settings_file, share=0):
+			self.assertEqual([runtime.refresh(), runtime.refresh()], [False, False])
+		self.assertEqual(len(logs.records), 1)
+		self.assertFalse(runtime.refresh())
+		self.assert_unchanged()
+
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_a_file_another_program_opens_for_a_moment_is_waited_for(self):
+		with (
+			self.assertNoLogs(library.log, "ERROR"),
+			held_open(self.paths.settings_file, share=0, for_seconds=0.2),
+		):
+			self.assertFalse(runtime.refresh())
+		self.assert_unchanged()
+
+	def test_the_dialogs_ok_and_the_watcher_never_undo_the_users_choices(self):
+		# The dialog saves on NVDA's thread while the watcher reads on its own. Before the fix, in 3
+		# seconds of this, 658 of 19,280 reads came back as the defaults and 1,186 saves failed.
+		manager = manager_module.DictionaryManager(runtime.paths(), runtime.provider_directories())
+		stop, ok_errors, refreshes, refresh_problems = threading.Event(), [], 0, []
+
+		def press_ok():
+			while not stop.is_set():
+				try:
+					manager.apply()
+				except Exception as error:
+					ok_errors.append(repr(error))
+
+		dialog = threading.Thread(target=press_ok)
+		dialog.start()
+		try:
+			deadline = time.monotonic() + 1.5
+			while time.monotonic() < deadline:
+				try:
+					if runtime.refresh():
+						refresh_problems.append("rebuilt: the selections changed under the user")
+				except Exception as error:
+					refresh_problems.append(repr(error))
+				refreshes += 1
+		finally:
+			stop.set()
+			dialog.join()
+		self.assertGreater(refreshes, 50)
+		self.assertEqual((refresh_problems[:3], ok_errors[:3]), ([], []))
+		self.assert_unchanged()
 
 
 class ReloadTests(RuntimeTestCase):

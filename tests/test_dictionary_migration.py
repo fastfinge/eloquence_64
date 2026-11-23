@@ -7,6 +7,7 @@ imports that backup as the user's own files so speech stays as it was.
 import builtins
 import importlib
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -14,6 +15,7 @@ import unittest
 from unittest import mock
 
 from addon.synthDrivers import _dictionary_library as library
+from tests.windows_file_locks import FILE_SHARE_READ, held_open
 
 CAT, DOG, COW = "`[.1kAt]", "`[.1dOg]", "`[.1kW]"
 
@@ -28,6 +30,12 @@ def _write(path, data):
 		f.write(data)
 
 
+def _new_start():
+	"""What restarting NVDA forgets: which old folders were checked, and what was already logged."""
+	library._old_directories_checked.clear()
+	library._reported.clear()
+
+
 class MigrationTestCase(unittest.TestCase):
 	def setUp(self):
 		temporary = tempfile.TemporaryDirectory()
@@ -35,7 +43,7 @@ class MigrationTestCase(unittest.TestCase):
 		self.root = temporary.name
 		self.paths = library.DictionaryPaths(os.path.join(self.root, "config"))
 		self.old_folder = os.path.join(self.root, "addons", "Eloquence", "synthDrivers", "eloquence")
-		library._failed_backups.clear()
+		_new_start()
 
 	def legacy(self, **files):
 		for name, data in files.items():
@@ -223,11 +231,26 @@ class BackupAtFirstLoadTests(MigrationTestCase):
 		self.assertEqual(os.listdir(self.paths.legacy), ["enuroot.dic"])
 		self.assertEqual(self.active("enuroot.dic"), _lines(f"cat\t{CAT}"))
 
-	def test_an_existing_backup_is_not_added_to(self):
+	def test_files_the_backup_does_not_hold_go_to_a_later_backup_and_are_imported(self):
 		self.legacy(enuroot_dic=_lines(f"cat\t{CAT}"))
 		_write(os.path.join(self.old_folder, "deuroot.dic"), _lines("hund\thund"))
 		self.refresh()
 		self.assertEqual(os.listdir(self.paths.legacy), ["enuroot.dic"])
+		later = os.path.join(self.paths.later_legacy, "1")
+		self.assertEqual(sorted(os.listdir(later)), [".imported", "deuroot.dic"])
+		self.assertEqual(self.rows("enu"), [("enuroot.dic", "root", True, True)])
+		self.assertEqual(self.rows("deu"), [("deuroot.dic", "root", True, True)])
+		self.assertEqual(self.active("deuroot.dic"), _lines("hund\thund"))
+
+	def test_files_a_backup_already_holds_are_not_backed_up_again(self):
+		# What every start after an update sees: the old files carried into the add-on folder.
+		self.legacy(enuroot_dic=_lines(f"cat\t{CAT}"))
+		_write(os.path.join(self.old_folder, "ENUROOT.dic"), _lines(f"cat\t{CAT}"))
+		self.refresh()
+		_new_start()
+		self.refresh()
+		self.assertFalse(os.path.exists(self.paths.later_legacy))
+		self.assertEqual(self.rows("enu"), [("enuroot.dic", "root", True, True)])
 
 	def test_a_backup_that_fails_is_tried_again_next_start_and_logged_once(self):
 		_write(os.path.join(self.old_folder, "enuroot.dic"), _lines(f"cat\t{CAT}"))
@@ -239,9 +262,137 @@ class BackupAtFirstLoadTests(MigrationTestCase):
 			self.refresh()
 		self.assertEqual(len(logs.records), 1)
 		self.assertFalse(library.load_settings(self.paths).legacy_imported)
-		library._failed_backups.clear()  # the next start
+		_new_start()
 		self.refresh()
 		self.assertEqual(self.active("enuroot.dic"), _lines(f"cat\t{CAT}"))
+
+
+class ImportThatCannotFinishTests(MigrationTestCase):
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_a_file_locked_at_the_first_start_is_imported_at_a_later_one(self):
+		self.legacy(enumain_dic=_lines("WHO\twho"), enuroot_dic=_lines(f"cat\t{CAT}"))
+		with (
+			self.assertLogs(library.log, "ERROR") as logs,
+			held_open(os.path.join(self.paths.legacy, "enumain.dic"), share=0),
+		):
+			self.refresh()
+			self.refresh()
+		self.assertEqual(len(logs.records), 1)
+		self.assertFalse(library.load_settings(self.paths).legacy_imported)
+		self.assertEqual(self.rows("enu"), [])
+		self.assertFalse(os.path.exists(self.paths.own))
+		self.refresh()
+		self.assertEqual(
+			self.rows("enu"), [("enuroot.dic", "root", True, True), ("enumain.dic", "main", True, True)]
+		)
+		self.assertEqual(self.active("enumain.dic"), _lines("WHO\twho"))
+
+	@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+	def test_an_import_whose_save_fails_leaves_no_copies_to_be_imported_twice(self):
+		library.save_settings(self.paths, library.Settings())
+		self.legacy(enumain_dic=_lines("WHO\twho"))
+		# Open without delete sharing, so dictionaries.json cannot be replaced.
+		with (
+			held_open(self.paths.settings_file, share=FILE_SHARE_READ),
+			self.assertRaises(PermissionError),
+		):
+			self.refresh()
+		self.assertEqual(os.listdir(self.paths.own), [])
+		self.refresh()
+		self.assertEqual(os.listdir(self.paths.own), ["enumain.dic"])
+		self.assertEqual(self.rows("enu"), [("enumain.dic", "main", True, True)])
+
+
+def _old_version_on_install(addon):
+	"""What versions before the dictionary library did on install: carry the .dic files across."""
+	source = os.path.join(addon.installPath, "synthDrivers", "eloquence")
+	target = os.path.join(addon.path, "synthDrivers", "eloquence")
+	os.makedirs(target, exist_ok=True)
+	for name in os.listdir(source):
+		if name.lower().endswith(".dic"):
+			shutil.copy2(os.path.join(source, name), os.path.join(target, name))
+
+
+class RollbackTests(MigrationTestCase):
+	"""Updating, going back to an older version, and updating again, as NVDA's add-on handler does it.
+
+	The incoming version is unpacked beside the installed one and its onInstall runs; at the next
+	restart the installed folder is deleted and the new one takes its place.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		self.installed = os.path.dirname(os.path.dirname(self.old_folder))
+		self.config = self.paths.config_directory
+
+	def install(self, on_install):
+		pending = self.installed + ".pendingInstall"
+		os.makedirs(os.path.join(pending, "synthDrivers", "eloquence"))
+		on_install(types.SimpleNamespace(path=pending, installPath=self.installed))
+		shutil.rmtree(self.installed)
+		os.replace(pending, self.installed)
+		_new_start()
+
+	def this_version_on_install(self, addon):
+		_run_install_tasks(addon, self.config, _FakeLog())
+
+	def test_files_made_after_going_back_are_imported_at_the_next_update(self):
+		_write(os.path.join(self.old_folder, "enumain.dic"), _lines("WHO\twho"))
+		self.install(self.this_version_on_install)
+		self.refresh()
+		self.assertEqual(self.rows("enu"), [("enumain.dic", "main", True, True)])
+
+		self.install(_old_version_on_install)
+		# The older version still has its dictionaries.
+		with open(os.path.join(self.old_folder, "enumain.dic"), "rb") as f:
+			self.assertEqual(f.read(), _lines("WHO\twho"))
+		# Where it keeps the files its own Update Dictionaries and editing produce.
+		_write(os.path.join(self.old_folder, "enumain.dic"), _lines("WHO\twho", "omg\toh my god"))
+		_write(os.path.join(self.old_folder, "enuroot.dic"), _lines(f"cat\t{CAT}"))
+
+		self.install(self.this_version_on_install)
+		self.refresh()
+		self.assertEqual(os.listdir(self.paths.legacy), ["enumain.dic"])
+		with open(os.path.join(self.paths.legacy, "enumain.dic"), "rb") as f:
+			self.assertEqual(f.read(), _lines("WHO\twho"))
+		self.assertEqual(os.listdir(self.paths.later_legacy), ["1"])
+		self.assertEqual(
+			self.rows("enu"),
+			[
+				("enumain.dic", "main", True, True),
+				("enuroot.dic", "root", True, True),
+				("enumain.dic", "main", True, True),
+			],
+		)
+		self.assertEqual(self.active("enumain.dic"), _lines("WHO\twho", "omg\toh my god"))
+		self.assertEqual(self.active("enuroot.dic"), _lines(f"cat\t{CAT}"))
+
+		# Nothing is imported twice: not at the next start, and not at an update with no going back.
+		self.refresh()
+		self.install(self.this_version_on_install)
+		self.refresh()
+		self.assertEqual(os.listdir(self.paths.later_legacy), ["1"])
+		self.assertEqual(len(self.rows("enu")), 3)
+
+
+def _run_install_tasks(addon, config, log):
+	"""Run this version's installTasks.onInstall with NVDA's modules stood in for."""
+	stubs = {
+		"addonHandler": types.SimpleNamespace(getCodeAddon=lambda: addon),
+		"logHandler": types.SimpleNamespace(log=log),
+		"globalVars": types.SimpleNamespace(appArgs=types.SimpleNamespace(configPath=config)),
+	}
+	had_translation = hasattr(builtins, "_")
+	with mock.patch.dict(sys.modules, stubs):
+		sys.modules.pop("addon.installTasks", None)
+		install_tasks = importlib.import_module("addon.installTasks")
+		try:
+			install_tasks.onInstall()
+		finally:
+			sys.modules.pop("addon.installTasks", None)
+			if not had_translation and hasattr(builtins, "_"):
+				del builtins._
+	return install_tasks
 
 
 class _FakeLog:
@@ -271,22 +422,7 @@ class InstallTaskTests(unittest.TestCase):
 		self.addon = types.SimpleNamespace(path=self.pending, installPath=self.installed)
 
 	def on_install(self):
-		stubs = {
-			"addonHandler": types.SimpleNamespace(getCodeAddon=lambda: self.addon),
-			"logHandler": types.SimpleNamespace(log=self.log),
-			"globalVars": types.SimpleNamespace(appArgs=types.SimpleNamespace(configPath=self.config)),
-		}
-		had_translation = hasattr(builtins, "_")
-		with mock.patch.dict(sys.modules, stubs):
-			sys.modules.pop("addon.installTasks", None)
-			install_tasks = importlib.import_module("addon.installTasks")
-			try:
-				install_tasks.onInstall()
-			finally:
-				sys.modules.pop("addon.installTasks", None)
-				if not had_translation and hasattr(builtins, "_"):
-					del builtins._
-		return install_tasks
+		return _run_install_tasks(self.addon, self.config, self.log)
 
 	def errors(self):
 		return [message for message in self.log.messages if message[0] == "error"]
@@ -302,10 +438,13 @@ class InstallTaskTests(unittest.TestCase):
 			self.assertEqual(f.read(), b"user dictionary")
 		self.assertEqual(self.errors(), [])
 
-	def test_nothing_is_carried_into_the_new_add_on_folder(self):
+	def test_the_old_files_are_carried_into_the_new_add_on_folder_too(self):
+		# So that going back to an older version finds them where it loads them from.
 		_write(os.path.join(self.installed_data, "enumain.dic"), b"user dictionary")
+		_write(os.path.join(self.installed_data, "ENU.SYN"), b"installed voice data")
 		self.on_install()
-		self.assertEqual(os.listdir(self.pending_data), [])
+		self.assertEqual(os.listdir(self.pending_data), ["enumain.dic"])
+		self.assertEqual(os.listdir(self.legacy), ["enumain.dic"])
 
 	def test_the_backup_is_written_once_and_never_changed(self):
 		_write(os.path.join(self.legacy, "enumain.dic"), b"first backup")

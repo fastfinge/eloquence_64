@@ -191,6 +191,26 @@ SAMPLE_RATE_VALUES: Dict[int, int] = {
 # such parameter.
 ECI_WIDEBAND = 32
 
+# ReLoq C's own parameter, with no counterpart in IBM's ECI: how often its
+# synthesiser takes new acoustic targets.  The original engine does so every
+# 5 ms; ReLoq C can also do it every 1 ms, which is what a fresh handle does
+# (the parameter reads 0).  Its own add-on's default is the per-language choice,
+# which is 5 ms for Castilian Spanish and Greek and 1 ms for everything else.
+#
+# Measured on ReLoq C 1.4.1 (codex/release-1-4-1-names@c24fbd78): each value
+# changes the audio and none changes its length (US English 40117 samples at
+# rate 50 and 18183 at rate 90, whichever clock), and the per-language value is
+# sample-identical to 5 ms in Castilian Spanish and to 1 ms in US English and
+# German.  ReLoq C's docs/validation/high-speed-acoustic-clock.md has its
+# comparison with the proprietary engine, which the 5 ms clock tracks closer.
+#
+# Sent only to ReLoq C (EngineConfig.acoustic_clock); the other engines have no
+# such parameter and are never offered it.
+RELOQ_ACOUSTIC_CLOCK = 0x101B
+RELOQ_CLOCK_FINE = 0
+RELOQ_CLOCK_ORIGINAL = 1
+RELOQ_CLOCK_PER_LANGUAGE = 2
+
 LANGS: Dict[str, int] = {
 	"esm": 131073,
 	"esp": 131072,
@@ -264,6 +284,10 @@ class EngineConfig:
 	# Turn on openevv's eciWideband; see ECI_WIDEBAND.  Off for the proprietary
 	# engine, which has no such parameter.
 	wideband: bool = False
+	# ReLoq C's acoustic clock, one of the RELOQ_CLOCK_ values; see
+	# RELOQ_ACOUSTIC_CLOCK.  None for every other engine, which leaves the
+	# parameter untouched.
+	acoustic_clock: Optional[int] = None
 
 
 def available_languages(dll_path: str) -> frozenset:
@@ -445,6 +469,8 @@ class EciEngine:
 		self._params[ECI_INPUT_TYPE] = 1
 		if self._config.wideband:
 			self._enable_wideband()
+		if self._config.acoustic_clock is not None:
+			self._set_acoustic_clock(self._config.acoustic_clock)
 		self._params[ECI_LANGUAGE_PARAM] = self._dll.eciGetParam(handle, ECI_LANGUAGE_PARAM)
 		for param in (RATE, PITCH, VLM, FLUCTUATION):
 			self._voice_params[param] = self._dll.eciGetVoiceParam(handle, 0, param)
@@ -482,6 +508,18 @@ class EciEngine:
 		self._params[ECI_WIDEBAND] = 1
 		self._dll.eciSynthesize(self._handle)
 		self._dll.eciSynchronize(self._handle)
+
+	def _set_acoustic_clock(self, value: int) -> None:
+		"""Choose ReLoq C's acoustic clock; see RELOQ_ACOUSTIC_CLOCK.
+
+		A ReLoq C older than the parameter (it arrived in 1.3.1) refuses it with
+		-1 and goes on speaking on its 1 ms clock, so a refusal is only worth a
+		note.  It is not recorded as set, either.
+		"""
+		if self._dll.eciSetParam(self._handle, RELOQ_ACOUSTIC_CLOCK, value) == -1:
+			LOGGER.info("Eloquence engine does not support the acoustic clock parameter")
+			return
+		self._params[RELOQ_ACOUSTIC_CLOCK] = value
 
 	def _probe_sample_rates(self) -> Dict[int, int]:
 		"""Ask the engine which rates it takes, as {Hz: ECI parameter value}.
@@ -730,6 +768,9 @@ class EciEngine:
 			self._handle = None
 
 	def set_param(self, param_id: int, value: int) -> None:
+		if param_id == RELOQ_ACOUSTIC_CLOCK:
+			self._set_acoustic_clock(value)
+			return
 		self._dll.eciSetParam(self._handle, param_id, value)
 		self._params[param_id] = value
 		# When changing voice (param 9), update all voice parameters
@@ -921,6 +962,7 @@ class EciDispatcher:
 			rewrite_ini=payload.get("rewriteIni", True),
 			sample_rate=payload.get("sampleRate", SAMPLE_RATE),
 			wideband=payload.get("wideband", False),
+			acoustic_clock=payload.get("acousticClock"),
 		)
 		self.engine = EciEngine(self._sink, config)
 		self.engine.abort_check = self.abort_check

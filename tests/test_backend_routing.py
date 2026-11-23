@@ -378,8 +378,9 @@ class DirectInitializePayloadTests(unittest.TestCase):
 		reloq = self.module._direct_initialize_payload(base, self.module.RELOQ)
 		self.assertTrue(openevv["wideband"])
 		self.assertNotIn("wideband", reloq)
-		# ReLoq C needs no adapter of its own since 1.1.
-		self.assertEqual(set(reloq), set(base) | {"eciPath", "rewriteIni"})
+		# ReLoq C needs no adapter of its own since 1.1.  Its acoustic clock is a
+		# choice about how it sounds; see tests/test_acoustic_clock.py.
+		self.assertEqual(set(reloq), set(base) | {"eciPath", "rewriteIni", "acousticClock"})
 		self.assertEqual(Path(openevv["eciPath"]).parent.name, "openevv")
 		self.assertEqual(Path(reloq["eciPath"]).parent.name, "reloq")
 		# Both engines read the add-on's own dictionaries.
