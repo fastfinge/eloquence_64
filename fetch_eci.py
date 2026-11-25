@@ -504,6 +504,22 @@ def installed_reloq_version():
 		return None
 
 
+def _has_reloq_dll(addon_path):
+	"""Whether a ReLoq C .nvda-addon is the Windows one, which carries the DLL."""
+	with zipfile.ZipFile(addon_path, "r") as zf:
+		return RELOQ_DLL_MEMBER.lower() in {name.lower() for name in zf.namelist()}
+
+
+def _windows_first(names):
+	"""Add-on names with the likeliest Windows build first.
+
+	From 2.1.0 ReLoq C publishes a Linux add-on beside the Windows one
+	(reloq-c-synth-linux-x64-*.nvda-addon), and it sorts first.  The name is only
+	used to order the attempts: what decides is whether the DLL is inside.
+	"""
+	return sorted(names, key=lambda name: ("linux" in name.lower(), name))
+
+
 def _install_reloq_addon(addon_path, version):
 	"""Take the engine and its notices out of a ReLoq C .nvda-addon."""
 	os.makedirs(RELOQ_DEST_DIR, exist_ok=True)
@@ -534,24 +550,35 @@ def fetch_reloq_release():
 	print(f"Resolving the newest ReLoq C release from {RELOQ_REPO}...")
 	release = _github_json(f"https://api.github.com/repos/{RELOQ_REPO}/releases/latest")
 	tag = release.get("tag_name") or "unknown"
-	asset = next(
-		(a for a in release.get("assets", ()) if a.get("name", "").endswith(RELOQ_ASSET_SUFFIX)),
-		None,
-	)
-	if asset is None:
+	assets = {
+		a.get("name", ""): a
+		for a in release.get("assets", ())
+		if a.get("name", "").endswith(RELOQ_ASSET_SUFFIX)
+	}
+	if not assets:
 		names = ", ".join(a.get("name", "?") for a in release.get("assets", ())) or "none"
 		raise SystemExit(
 			f"ERROR: ReLoq C release {tag} has no *{RELOQ_ASSET_SUFFIX} asset.\n"
 			f"       Assets: {names}"
 		)
-	print(f"Downloading ReLoq C {tag}:\n  {asset['browser_download_url']}")
-	tmpfd, tmppath = tempfile.mkstemp(suffix=RELOQ_ASSET_SUFFIX)
-	os.close(tmpfd)
-	try:
-		_download(asset["browser_download_url"], tmppath)
-		_install_reloq_addon(tmppath, tag)
-	finally:
-		os.unlink(tmppath)
+	for name in _windows_first(assets):
+		asset = assets[name]
+		print(f"Downloading ReLoq C {tag}:\n  {asset['browser_download_url']}")
+		tmpfd, tmppath = tempfile.mkstemp(suffix=RELOQ_ASSET_SUFFIX)
+		os.close(tmpfd)
+		try:
+			_download(asset["browser_download_url"], tmppath)
+			if _has_reloq_dll(tmppath):
+				_install_reloq_addon(tmppath, tag)
+				return
+			print(f"  {name} has no {RELOQ_DLL_MEMBER}; trying the next add-on.")
+		finally:
+			os.unlink(tmppath)
+	raise SystemExit(
+		f"ERROR: no add-on in ReLoq C release {tag} contains {RELOQ_DLL_MEMBER}.\n"
+		f"       Tried: {', '.join(_windows_first(assets))}\n"
+		"       The add-on layout changed; fetch_eci.py needs updating."
+	)
 
 
 def _newest_reloq_ci_artifact(token):
@@ -612,15 +639,22 @@ def fetch_reloq_ci():
 			print(f"GitHub refused the ReLoq C artifact ({error.code}); taking its newest release.")
 			fetch_reloq_release()
 			return
-		# The artifact is a zip holding the .nvda-addon, itself a zip.
+		# The artifact is a zip holding the .nvda-addon, itself a zip.  It may hold
+		# a Linux add-on as well, so take the one with the DLL in it.
+		addon_path = None
 		with zipfile.ZipFile(artifact_zip, "r") as zf:
-			addon = next((n for n in zf.namelist() if n.endswith(RELOQ_ASSET_SUFFIX)), None)
-			if addon is None:
-				raise SystemExit(
-					f"ERROR: ReLoq C build run {run['id']} carries no *{RELOQ_ASSET_SUFFIX}.\n"
-					"       The artifact layout changed; fetch_eci.py needs updating."
-				)
-			addon_path = _extract(zf, addon, tmpdir, "reloq.nvda-addon")
+			addons = [n for n in zf.namelist() if n.endswith(RELOQ_ASSET_SUFFIX)]
+			for index, addon in enumerate(_windows_first(addons)):
+				candidate = _extract(zf, addon, tmpdir, f"reloq-{index}.nvda-addon")
+				if _has_reloq_dll(candidate):
+					addon_path = candidate
+					break
+		if addon_path is None:
+			raise SystemExit(
+				f"ERROR: ReLoq C build run {run['id']} carries no *{RELOQ_ASSET_SUFFIX} "
+				f"containing {RELOQ_DLL_MEMBER}.\n"
+				"       The artifact layout changed; fetch_eci.py needs updating."
+			)
 		_install_reloq_addon(addon_path, version)
 	finally:
 		shutil.rmtree(tmpdir, ignore_errors=True)
