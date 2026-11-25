@@ -4,15 +4,18 @@ import contextlib
 import http.server
 import io
 import os
+import sys
 import tempfile
 import threading
 import unittest
 import zipfile
 from unittest import mock
 
+from addon.synthDrivers import _dictionary_library as library
 from addon.synthDrivers import _dictionary_sets as sets
 from addon.synthDrivers import _dictionary_update as dictionary_update
 from addon.synthDrivers._dictionary_update import FileStatus, UpdateStage
+from tests.windows_file_locks import FILE_SHARE_READ, held_open
 
 COMMIT = "96bcd0009e2351cae0394ea561898be5780a071e"
 CAT, DOG = "`[.1kAt]", "`[.1dOg]"
@@ -316,3 +319,29 @@ class RemoveSourceTests(SourceTestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+@unittest.skipUnless(sys.platform == "win32", "a Windows sharing violation")
+class SetInUseTests(SourceTestCase):
+	"""The dictionary watcher reads set.ini in every folder under sources/ every two seconds.
+
+	Windows will not rename a folder while a file inside it is open without delete sharing, so an
+	update that met the watcher failed with "Access is denied" and left a .new folder behind.
+	"""
+
+	SET = "github.example.repo"
+
+	def test_an_update_waits_for_a_reader_of_the_set_it_replaces(self):
+		self.update({"ENUroot.dic": _lines(f"cat	{CAT}")})
+		with held_open(os.path.join(self.sources, self.SET, "set.ini"), FILE_SHARE_READ, for_seconds=0.2):
+			self.update({"ENUroot.dic": _lines(f"dog	{DOG}")})
+		self.assertEqual(self.stored(self.SET, "enuroot.dic"), _lines(f"dog	{DOG}"))
+		self.assertEqual(os.listdir(self.sources), [self.SET])
+
+	def test_an_update_waits_for_a_reader_of_the_copy_it_is_swapping_in(self):
+		new = os.path.join(self.sources, self.SET + ".new")
+		os.makedirs(new)
+		sets.write_set_ini(new, self.SET, "Repo", "https://github.com/example/Repo")
+		with held_open(os.path.join(new, "set.ini"), FILE_SHARE_READ, for_seconds=0.2):
+			library.swap_in_directory(new, os.path.join(self.sources, self.SET))
+		self.assertEqual(os.listdir(self.sources), [self.SET])
