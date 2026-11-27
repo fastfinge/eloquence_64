@@ -34,9 +34,12 @@ commits, and measures the same as that build -- ten clean cancellation rounds,
 and identical audio with and without the add-on's dictionaries.
 
 ReLoq C follows the same policy (``--reloq-release``), with one difference:
-its CI only builds the NVDA add-on on its ``codex/release*`` branches, and keeps
-that artifact for 14 days, so a development build falls back to its newest
-release whenever no artifact is left or no token is available.
+its CI never builds the NVDA add-on from main.  It builds it on ``codex/release*``
+branches, which hold listening experiments as well as release candidates, and
+keeps the artifact for 14 days.  So a development build takes a CI build only
+when its commit is in main and newer than the newest release, and otherwise
+takes that release -- which is the usual case, since main is normally exactly
+the release.
 
 Downloading a CI artifact needs a GitHub token, unlike a release asset; see
 _github_token().
@@ -48,7 +51,7 @@ Usage:
     python fetch_eci.py --no-openevv      # skip openevv
     python fetch_eci.py --openevv-release # take the newest release, not CI
     python fetch_eci.py --no-reloq        # skip ReLoq C
-    python fetch_eci.py --reloq-release   # take ReLoq C's newest release, not CI
+    python fetch_eci.py --reloq-release   # take ReLoq C's newest release, not main
 """
 
 import http.client
@@ -490,6 +493,7 @@ RELOQ_DLL_MEMBER = "synthDrivers/reloqC/eci.dll"
 RELOQ_NOTICE_PREFIX = "doc/licenses/"
 RELOQ_CI_WORKFLOW = "packages.yml"
 RELOQ_CI_ARTIFACT = "nvda-addon"
+RELOQ_MAIN_BRANCH = "main"
 
 
 def reloq_present():
@@ -545,10 +549,15 @@ def _install_reloq_addon(addon_path, version):
 	print(f"Done. ReLoq C {version} installed in {RELOQ_DEST_DIR}.")
 
 
-def fetch_reloq_release():
-	"""Install the engine from ReLoq C's newest release."""
+def _newest_reloq_release():
 	print(f"Resolving the newest ReLoq C release from {RELOQ_REPO}...")
-	release = _github_json(f"https://api.github.com/repos/{RELOQ_REPO}/releases/latest")
+	return _github_json(f"https://api.github.com/repos/{RELOQ_REPO}/releases/latest")
+
+
+def fetch_reloq_release(release=None):
+	"""Install the engine from ReLoq C's newest release."""
+	if release is None:
+		release = _newest_reloq_release()
 	tag = release.get("tag_name") or "unknown"
 	assets = {
 		a.get("name", ""): a
@@ -581,18 +590,53 @@ def fetch_reloq_release():
 	)
 
 
-def _newest_reloq_ci_artifact(token):
-	"""The newest successful packaging run whose add-on artifact has not expired.
+def _reloq_compare(base, head):
+	"""How ``head`` stands to ``base`` in ReLoq C's history, or None if unknown.
 
-	Any branch: ReLoq C only runs this workflow on its release branches, so
-	restricting it to main as openevv's is would find nothing.
+	GitHub's answer is "ahead" when head has commits base lacks and nothing is
+	missing from it, "behind" or "identical" when everything in head is already
+	in base, and "diverged" when each has commits the other lacks.
 	"""
+	try:
+		return _github_json(
+			f"https://api.github.com/repos/{RELOQ_REPO}/compare/{base}...{head}"
+		).get("status")
+	except urllib.error.HTTPError as error:
+		if error.code != 404:
+			raise
+		return None
+
+
+def _newest_reloq_ci_artifact(release_tag):
+	"""The newest build of unreleased work on ReLoq C's main branch, if any.
+
+	ReLoq C never builds its add-on from main.  It builds it on ``codex/release*``
+	branches, and uses that prefix for listening experiments as well as release
+	candidates, so the newest build is usually of work that has not been merged
+	and may never be: on 2026-11-25 it was a CamelCase prototype seven commits
+	off main.  What makes a build main's is its commit, not its branch, so a
+	build counts only when that commit is in main (fastfinge/eloquence_64#187).
+
+	It must also be newer than the release.  A build already contained in the
+	newest release is that release at best and an older engine at worst, and
+	main is normally exactly the release, so the usual answer is none and the
+	caller takes the release.
+	"""
+	if _reloq_compare(release_tag, RELOQ_MAIN_BRANCH) != "ahead":
+		return None, None
 	runs = _github_json(
 		f"https://api.github.com/repos/{RELOQ_REPO}/actions/workflows/{RELOQ_CI_WORKFLOW}"
 		"/runs?status=success&per_page=30"
 	).get("workflow_runs", ())
 	runs.sort(key=lambda r: (r.get("run_number") or 0, r.get("created_at") or ""), reverse=True)
 	for run in runs:
+		head_sha = run.get("head_sha")
+		if not head_sha:
+			continue
+		if _reloq_compare(RELOQ_MAIN_BRANCH, head_sha) not in ("behind", "identical"):
+			continue
+		if _reloq_compare(release_tag, head_sha) != "ahead":
+			continue
 		artifacts = _github_json(
 			f"https://api.github.com/repos/{RELOQ_REPO}/actions/runs/{run['id']}/artifacts"
 		).get("artifacts", ())
@@ -603,25 +647,34 @@ def _newest_reloq_ci_artifact(token):
 
 
 def fetch_reloq_ci():
-	"""Install the engine from ReLoq C's newest CI build, or its newest release.
+	"""Install unreleased work from ReLoq C's main branch, or its newest release.
 
-	The default outside published releases.  Falls back to the release rather
-	than failing, because ReLoq C's artifacts are short lived and only built on
-	its release branches, so having none is the normal case between releases.
+	The default outside published releases, so a change upstream has merged can
+	be tried here before a release of this add-on carries it.  Taking the
+	release is the normal outcome, not a failure: see
+	_newest_reloq_ci_artifact().
 	"""
 	token = _github_token()
 	if token is None:
 		print("No GitHub token for a ReLoq C CI artifact; taking its newest release.")
 		fetch_reloq_release()
 		return
-	print(f"Resolving the newest successful {RELOQ_CI_WORKFLOW} run on {RELOQ_REPO}...")
-	run, artifact = _newest_reloq_ci_artifact(token)
+	release = _newest_reloq_release()
+	tag = release.get("tag_name") or "unknown"
+	print(f"Looking for a build of {RELOQ_MAIN_BRANCH} newer than {tag} on {RELOQ_REPO}...")
+	run, artifact = _newest_reloq_ci_artifact(tag)
 	if artifact is None:
-		print("No ReLoq C CI artifact is still downloadable; taking its newest release.")
-		fetch_reloq_release()
+		print(
+			f"ReLoq C's {RELOQ_MAIN_BRANCH} has no downloadable build newer than {tag}; "
+			"taking that release."
+		)
+		fetch_reloq_release(release)
 		return
 	head_sha = run.get("head_sha") or "unknown"
-	version = f"{run.get('head_branch') or '?'}@{head_sha[:8]} (build run {run['id']})"
+	version = (
+		f"{RELOQ_MAIN_BRANCH}@{head_sha[:8]} "
+		f"(build run {run['id']}, built on {run.get('head_branch') or '?'})"
+	)
 	print(f"Downloading ReLoq C {version}:\n  {artifact['archive_download_url']}")
 	tmpdir = tempfile.mkdtemp()
 	try:

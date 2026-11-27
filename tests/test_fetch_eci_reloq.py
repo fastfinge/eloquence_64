@@ -12,7 +12,9 @@ import os
 import shutil
 import tempfile
 import unittest
+import urllib.error
 import zipfile
+from email.message import Message
 from unittest import mock
 
 import fetch_eci
@@ -127,6 +129,7 @@ class ReloqCiArtifactTests(unittest.TestCase):
 		mock.patch.object(fetch_eci, "RELOQ_DEST_DIR", self.dest).start()
 		mock.patch.object(fetch_eci, "_is_pe32_plus", return_value=True).start()
 		mock.patch.object(fetch_eci, "_github_token", return_value="token").start()
+		mock.patch.object(fetch_eci, "_newest_reloq_release", return_value={"tag_name": "v9"}).start()
 		self.addCleanup(mock.patch.stopall)
 
 	def _serve_artifact(self, addons):
@@ -154,7 +157,7 @@ class ReloqCiArtifactTests(unittest.TestCase):
 			self.assertEqual(f.read(), b"the engine")
 		self.assertEqual(
 			fetch_eci.installed_reloq_version(),
-			"codex/release-x@01234567 (build run 7)",
+			"main@01234567 (build run 7, built on codex/release-x)",
 		)
 
 	def test_an_artifact_without_the_engine_is_an_error(self):
@@ -164,6 +167,123 @@ class ReloqCiArtifactTests(unittest.TestCase):
 			fetch_eci.fetch_reloq_ci()
 
 		self.assertIn("build run 7", str(raised.exception))
+
+
+class ReloqMainOnlyTests(unittest.TestCase):
+	"""Only unreleased work that is on ReLoq C's main branch is taken from CI.
+
+	ReLoq C builds its add-on on codex/release* branches and never on main, and
+	that prefix holds listening experiments too.  Taking the newest build installed
+	codex/release-camel-dictionary-dev4-20261125 on 2026-11-25, a prototype seven
+	commits off main (fastfinge/eloquence_64#187).
+	"""
+
+	API = "https://api.github.com/repos/hozosch/Reloq-C"
+
+	def setUp(self):
+		self.compare = {}
+		self.runs = []
+		self.artifacts = {}
+		self.asked = []
+		mock.patch.object(fetch_eci, "_github_json", side_effect=self._api).start()
+		self.addCleanup(mock.patch.stopall)
+
+	def _api(self, url):
+		self.asked.append(url)
+		path = url[len(self.API) :]
+		if path.startswith("/compare/"):
+			return {"status": self.compare[path[len("/compare/") :]]}
+		if path.startswith("/actions/workflows/"):
+			return {"workflow_runs": list(self.runs)}
+		if path.startswith("/actions/runs/"):
+			run_id = int(path.split("/")[3])
+			return {"artifacts": self.artifacts.get(run_id, [{"name": "nvda-addon"}])}
+		raise AssertionError(f"unexpected request: {url}")
+
+	def _run(self, number, sha, in_main, past_release=True):
+		"""A successful packaging run of this commit."""
+		self.runs.append({"id": number, "run_number": number, "head_sha": sha})
+		self.compare[f"main...{sha}"] = "behind" if in_main else "ahead"
+		self.compare[f"v2.1.1...{sha}"] = "ahead" if past_release else "behind"
+
+	def _found(self):
+		run, artifact = fetch_eci._newest_reloq_ci_artifact("v2.1.1")
+		return None if run is None else run["id"]
+
+	def test_main_at_the_release_has_nothing_newer_to_take(self):
+		# The usual state: upstream tags main as it moves it.
+		self.compare["v2.1.1...main"] = "identical"
+		self._run(3, "experiment", in_main=False)
+
+		self.assertIsNone(self._found())
+		# And it is settled without looking at a single build.
+		self.assertEqual(len(self.asked), 1)
+
+	def test_an_unmerged_experiment_is_passed_over_for_an_older_build_in_main(self):
+		self.compare["v2.1.1...main"] = "ahead"
+		self._run(1, "merged", in_main=True)
+		self._run(2, "experiment", in_main=False)
+
+		self.assertEqual(self._found(), 1)
+
+	def test_a_branch_that_diverged_from_main_does_not_count(self):
+		self.compare["v2.1.1...main"] = "ahead"
+		self._run(1, "side", in_main=False)
+		self.compare["main...side"] = "diverged"
+
+		self.assertIsNone(self._found())
+
+	def test_a_build_the_release_already_holds_is_not_taken(self):
+		# It is in main, but so is the release, and the release is newer.
+		self.compare["v2.1.1...main"] = "ahead"
+		self._run(1, "old", in_main=True, past_release=False)
+
+		self.assertIsNone(self._found())
+
+	def test_the_build_of_mains_own_head_counts(self):
+		self.compare["v2.1.1...main"] = "ahead"
+		self._run(1, "head", in_main=True)
+		self.compare["main...head"] = "identical"
+
+		self.assertEqual(self._found(), 1)
+
+	def test_an_expired_artifact_is_passed_over(self):
+		self.compare["v2.1.1...main"] = "ahead"
+		self._run(1, "older", in_main=True)
+		self._run(2, "newer", in_main=True)
+		self.artifacts[2] = [{"name": "nvda-addon", "expired": True}]
+
+		self.assertEqual(self._found(), 1)
+
+	def test_a_release_tag_github_cannot_compare_means_the_release(self):
+		error = urllib.error.HTTPError("https://example.test", 404, "nope", Message(), None)
+		fetch_eci._github_json.side_effect = error
+
+		self.assertEqual(fetch_eci._newest_reloq_ci_artifact("unknown"), (None, None))
+
+
+class ReloqDefaultFetchTests(unittest.TestCase):
+	def setUp(self):
+		mock.patch.object(fetch_eci, "_github_token", return_value="token").start()
+		self.release = {"tag_name": "v2.1.1", "assets": []}
+		mock.patch.object(fetch_eci, "_newest_reloq_release", return_value=self.release).start()
+		self.install_release = mock.patch.object(fetch_eci, "fetch_reloq_release").start()
+		self.addCleanup(mock.patch.stopall)
+
+	def test_with_nothing_newer_on_main_the_release_is_installed(self):
+		mock.patch.object(fetch_eci, "_newest_reloq_ci_artifact", return_value=(None, None)).start()
+
+		fetch_eci.fetch_reloq_ci()
+
+		# The release already looked up, not a second request for it.
+		self.install_release.assert_called_once_with(self.release)
+
+	def test_without_a_token_the_release_is_installed(self):
+		fetch_eci._github_token.return_value = None
+
+		fetch_eci.fetch_reloq_ci()
+
+		self.install_release.assert_called_once_with()
 
 
 if __name__ == "__main__":
