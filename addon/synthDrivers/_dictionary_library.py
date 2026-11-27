@@ -710,13 +710,15 @@ def swap_in_directory(new_directory, active_directory):
 	old_directory = active_directory + ".old"
 	shutil.rmtree(old_directory, ignore_errors=True)
 	try:
+		# Windows refuses to rename a folder while a file in it is open without delete sharing, and
+		# the dictionary watcher opens set.ini in every folder under sources/ every two seconds.
 		if os.path.isdir(active_directory):
-			os.rename(active_directory, old_directory)
-		os.rename(new_directory, active_directory)
+			_while_in_use(os.rename, active_directory, old_directory)
+		_while_in_use(os.rename, new_directory, active_directory)
 	except OSError:
 		# Put the previous set back if it was moved aside, so a failed swap leaves things as they were.
 		if not os.path.isdir(active_directory) and os.path.isdir(old_directory):
-			os.rename(old_directory, active_directory)
+			_while_in_use(os.rename, old_directory, active_directory)
 		shutil.rmtree(new_directory, ignore_errors=True)
 		raise
 	shutil.rmtree(old_directory, ignore_errors=True)
